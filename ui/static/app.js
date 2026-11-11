@@ -95,16 +95,40 @@ function jobModal(jobId, title, onDone) {
 
 // ---------- каркас ----------
 const PAGES = [
-  ['dashboard', 'Дашборд', pageDashboard],
-  ['sites', 'Веб-сайты', pageSites],
-  ['cms', 'Автоустановка CMS', pageCMS],
-  ['php', 'PHP & Модули', pagePHP],
-  ['db', 'Базы данных', pageDB],
-  ['pki', 'SSL / PKI', pagePKI],
-  ['terminal', 'Терминал', pageTerminal],
-  ['files', 'Файловый менеджер', pageFiles],
-  ['settings', 'Настройки', pageSettings],
+  ['dashboard', 'Дашборд', pageDashboard, 'dashboard'],
+  ['sites', 'Веб-сайты', pageSites, 'globe'],
+  ['cms', 'Автоустановка CMS', pageCMS, 'package'],
+  ['php', 'PHP & Модули', pagePHP, 'code'],
+  ['db', 'Базы данных', pageDB, 'database'],
+  ['pki', 'SSL / PKI', pagePKI, 'shield'],
+  ['terminal', 'Терминал', pageTerminal, 'terminal'],
+  ['files', 'Файловый менеджер', pageFiles, 'folder'],
+  ['settings', 'Настройки', pageSettings, 'sliders'],
 ];
+
+// Иконки (статические SVG-пути, 24×24, stroke)
+const ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
+  package: '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+  code: '<path d="M8 8l-5 4 5 4M16 8l5 4-5 4M14 5l-4 14"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+  folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>',
+  sliders: '<path d="M4 6h8M18 6h2M4 12h2M12 12h8M4 18h10M20 18h0"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  moon: '<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>',
+  logout: '<path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>',
+  server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01"/>',
+};
+function icon(name, size = 18) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', size); svg.setAttribute('height', size);
+  svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+  svg.innerHTML = ICONS[name] || '';
+  return svg;
+}
 
 function theme() {
   const t = localStorage.getItem('theme');
@@ -116,14 +140,20 @@ theme();
 function renderShell() {
   const cur = (location.hash.slice(1) || 'dashboard');
   const nav = h('nav', { class: 'nav' }, PAGES.filter(p => ME.user.role === 'admin' || !['terminal', 'files'].includes(p[0])).map(p =>
-    h('a', { href: '#' + p[0], class: p[0] === cur ? 'active' : '' }, p[1])));
+    h('a', { href: '#' + p[0], class: p[0] === cur ? 'active' : '' }, icon(p[3]), h('span', {}, p[1]))));
   const main = h('main', { class: 'main' });
+  const toggleTheme = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('theme', t); theme(); };
+  const logout = async () => { try { await api('POST', '/logout'); } catch (e) { /* */ } ME = null; renderLogin(); };
   $app.replaceChildren(h('div', { class: 'layout' },
-    h('aside', { class: 'side' }, h('div', { class: 'brand' }, 'Go', h('span', {}, 'ServerPanel')), nav, h('div', { class: 'grow' }),
-      h('div', { class: 'row', style: 'padding:0 6px' },
-        h('button', { class: 'sm', onclick: () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('theme', t); theme(); } }, '◐ Тема'),
-        h('button', { class: 'sm', onclick: async () => { try { await api('POST', '/logout'); } catch (e) { /* */ } ME = null; renderLogin(); } }, 'Выйти')),
-      h('div', { class: 'muted small', style: 'padding:6px 10px' }, ME.user.username + ' · ' + ME.user.role + (ME.dry_run ? ' · dry-run' : ''))),
+    h('aside', { class: 'side' },
+      h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('server', 18)), h('div', { class: 'brand-name' }, 'Go', h('span', {}, 'ServerPanel'))),
+      nav, h('div', { class: 'grow' }),
+      h('div', { class: 'user' },
+        h('div', { class: 'avatar' }, (ME.user.username[0] || '?').toUpperCase()),
+        h('div', { class: 'user-info' }, h('div', { class: 'user-name' }, ME.user.username),
+          h('div', { class: 'user-role' }, ME.user.role, ME.dry_run ? h('span', { class: 'chip warn' }, 'dry-run') : null)),
+        h('button', { class: 'iconbtn', title: 'Сменить тему', onclick: toggleTheme }, icon('moon', 16)),
+        h('button', { class: 'iconbtn', title: 'Выйти', onclick: logout }, icon('logout', 16)))),
     main));
   const page = PAGES.find(p => p[0] === cur) || PAGES[0];
   cleanups.forEach(f => { try { f(); } catch (e) { /* */ } }); cleanups = [];
@@ -195,7 +225,13 @@ async function pageDashboard(main) {
 // ---------- Сайты ----------
 async function pageSites(main) {
   const tbody = h('tbody');
-  main.append(h('div', { class: 'row sp' }, h('h1', {}, 'Веб-сайты'), h('div', { class: 'row' },
+  const banner = h('div');
+  api('GET', '/nginx').then(n => {
+    if (n.installed) return;
+    banner.replaceChildren(h('div', { class: 'banner' }, h('div', {}, h('b', {}, 'nginx не установлен'), h('div', { class: 'muted small' }, 'Без него сайты не будут обслуживаться. Установка займёт около минуты.')),
+      h('button', { class: 'primary', onclick: guard(async () => { const r = await api('POST', '/nginx/install'); jobModal(r.job, 'Установка nginx', () => renderShell()); }) }, 'Установить nginx')));
+  }).catch(() => { });
+  main.append(banner, h('div', { class: 'row sp page-h' }, h('h1', {}, 'Веб-сайты'), h('div', { class: 'row' },
     h('button', { onclick: guard(async () => { const r = await api('POST', '/nginx/test'); modal('nginx -t', h('pre', { class: 'log' }, r.output || '(пусто)')); }) }, 'Проверить nginx -t'),
     h('button', { class: 'primary', onclick: () => siteForm() }, '+ Добавить сайт'))),
     h('div', { class: 'card' }, h('table', {}, h('thead', {}, h('tr', {}, ['Домен', 'Тип', 'PHP', 'HTTPS', ''].map(x => h('th', {}, x)))), tbody)));
@@ -341,7 +377,13 @@ async function pageDB(main) {
   const drawTabs = () => tabs.replaceChildren(...[['mysql', 'MySQL / MariaDB'], ['postgres', 'PostgreSQL']].map(([k, l]) => h('button', { class: eng === k ? 'on' : '', onclick: () => { eng = k; drawTabs(); load(); } }, l + (st[k]?.installed ? '' : ' (не установлен)'))));
   const showCreds = (title, o) => modal(title, h('div', {}, h('p', { class: 'muted' }, 'Сохраните пароль — повторно он показан не будет.'), h('pre', { class: 'log' }, Object.entries(o).map(([k, v]) => k + ': ' + v).join('\n'))));
   async function load() {
-    if (!st[eng]?.installed) { body.replaceChildren(h('div', { class: 'card muted' }, 'Клиент СУБД не найден в системе.')); return; }
+    if (!st[eng]?.installed) {
+      const name = eng === 'mysql' ? 'MariaDB (совместима с MySQL)' : 'PostgreSQL';
+      body.replaceChildren(h('div', { class: 'card empty' }, icon('database', 36), h('h2', {}, 'Сервер СУБД не установлен'),
+        h('p', { class: 'muted' }, 'Панель установит ' + name + ' через apt и включит автозапуск.'),
+        h('button', { class: 'primary', onclick: guard(async () => { const r = await api('POST', `/db/${eng}/install`); jobModal(r.job, 'Установка ' + name, () => renderShell()); }) }, 'Установить ' + (eng === 'mysql' ? 'MariaDB' : 'PostgreSQL'))));
+      return;
+    }
     const [dbs, users, backups] = await Promise.all([api('GET', `/db/${eng}/databases`), api('GET', `/db/${eng}/users`), api('GET', '/dbbackups')]);
     body.replaceChildren(
       h('div', { class: 'card' }, h('div', { class: 'row sp' }, h('h2', {}, 'Базы данных'), h('button', { class: 'primary sm', onclick: createDB }, '+ База')),

@@ -77,6 +77,29 @@ func (m *Manager) Status() map[string]Status {
 	}
 }
 
+// Install устанавливает сервер СУБД через apt и включает его в автозагрузку.
+func (m *Manager) Install(ctx context.Context, w io.Writer, engine string) error {
+	if err := checkEngine(engine); err != nil {
+		return err
+	}
+	pkgs, svc := []string{"mariadb-server", "mariadb-client"}, "mariadb"
+	if engine == Postgres {
+		pkgs, svc = []string{"postgresql", "postgresql-client"}, "postgresql"
+	}
+	o := execx.Opts{Stdout: w}
+	fmt.Fprintln(w, "→ apt-get update")
+	if _, err := m.Run.Do(ctx, o, "apt-get", "update"); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "→ apt-get install", strings.Join(pkgs, " "))
+	if _, err := m.Run.Do(ctx, o, "apt-get", append([]string{"install", "-y"}, pkgs...)...); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "→ systemctl enable --now", svc)
+	_, err := m.Run.Do(ctx, o, "systemctl", "enable", "--now", svc)
+	return err
+}
+
 func checkEngine(e string) error {
 	if e != MySQL && e != Postgres {
 		return fmt.Errorf("неизвестная СУБД %q", e)

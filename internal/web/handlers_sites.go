@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -298,6 +299,20 @@ func (a *App) handleSiteLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"log": out})
+}
+
+func (a *App) handleNginxStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"installed": a.Nginx.Installed()})
+}
+
+func (a *App) handleNginxInstall(w http.ResponseWriter, r *http.Request) {
+	if a.Nginx.Installed() {
+		fail(w, 400, "nginx уже установлен")
+		return
+	}
+	j := a.Jobs.Start("Установка nginx", func(ctx context.Context, w io.Writer) error { return a.Nginx.Install(ctx, w) })
+	a.audit(r, "nginx.install", "")
+	a.jobResp(w, j.ID)
 }
 
 func (a *App) handleNginxTest(w http.ResponseWriter, r *http.Request) {

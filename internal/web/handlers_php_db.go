@@ -94,6 +94,21 @@ func (a *App) handleDBStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, a.DB.Status())
 }
 
+func (a *App) handleDBInstall(w http.ResponseWriter, r *http.Request) {
+	eng := r.PathValue("engine")
+	if eng != databases.MySQL && eng != databases.Postgres {
+		fail(w, 400, "неизвестная СУБД")
+		return
+	}
+	if a.DB.Status()[eng].Installed {
+		fail(w, 400, "СУБД уже установлена")
+		return
+	}
+	j := a.Jobs.Start("Установка СУБД "+eng, func(ctx context.Context, w io.Writer) error { return a.DB.Install(ctx, w, eng) })
+	a.audit(r, "db.install", eng)
+	a.jobResp(w, j.ID)
+}
+
 func (a *App) handleDBList(w http.ResponseWriter, r *http.Request) {
 	l, err := a.DB.ListDatabases(r.Context(), r.PathValue("engine"))
 	if err != nil {

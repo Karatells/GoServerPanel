@@ -4,6 +4,7 @@ package nginx
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -209,6 +210,24 @@ func Render(s store.Site, tls *TLS, phpSock, logDir string) string {
 		fmt.Fprintf(&b, "server {\n    listen 443 ssl http2;\n    ssl_certificate %s;\n    ssl_certificate_key %s;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_prefer_server_ciphers off;\n%s}\n", tls.Cert, tls.Key, body())
 	}
 	return b.String()
+}
+
+func (m *Manager) Installed() bool { return execx.Exists(m.Cfg.NginxBin) }
+
+// Install устанавливает nginx через apt и включает его.
+func (m *Manager) Install(ctx context.Context, w io.Writer) error {
+	o := execx.Opts{Stdout: w}
+	fmt.Fprintln(w, "→ apt-get update")
+	if _, err := m.Run.Do(ctx, o, "apt-get", "update"); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "→ apt-get install nginx")
+	if _, err := m.Run.Do(ctx, o, "apt-get", "install", "-y", "nginx"); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "→ systemctl enable --now nginx")
+	_, err := m.Run.Do(ctx, o, "systemctl", "enable", "--now", "nginx")
+	return err
 }
 
 func (m *Manager) confPath(domain string) string {

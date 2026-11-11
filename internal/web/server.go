@@ -305,6 +305,8 @@ func (a *App) Handler() http.Handler {
 	r("GET /api/sites/{id}/config", lvlAny, a.handleSiteConfigGet)
 	r("PUT /api/sites/{id}/config", lvlWrite, a.handleSiteConfigPut)
 	r("GET /api/sites/{id}/logs", lvlAdmin, a.handleSiteLogs)
+	r("GET /api/nginx", lvlAny, a.handleNginxStatus)
+	r("POST /api/nginx/install", lvlWrite, a.handleNginxInstall)
 	r("POST /api/nginx/test", lvlWrite, a.handleNginxTest)
 	r("POST /api/nginx/reload", lvlWrite, a.handleNginxReload)
 
@@ -318,6 +320,7 @@ func (a *App) Handler() http.Handler {
 	r("GET /api/db", lvlAny, a.handleDBStatus)
 	r("GET /api/dbbackups", lvlAdmin, a.handleDBBackups)
 	r("GET /api/dbbackups/{file}", lvlAdmin, a.handleDBBackupDownload)
+	r("POST /api/db/{engine}/install", lvlWrite, a.handleDBInstall)
 	r("GET /api/db/{engine}/databases", lvlAny, a.handleDBList)
 	r("POST /api/db/{engine}/databases", lvlWrite, a.handleDBCreate)
 	r("DELETE /api/db/{engine}/databases/{name}", lvlWrite, a.handleDBDrop)

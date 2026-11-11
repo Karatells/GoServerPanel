@@ -43,6 +43,13 @@ func (r *Runner) run(ctx context.Context, o Opts, name string, args []string) (s
 	}
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
+	if name == "apt-get" || name == "apt" {
+		// не падать, если lock держит unattended-upgrades: ждать освобождения до 15 минут
+		args = append([]string{"-o", "DPkg::Lock::Timeout=900"}, args...)
+		if o.Stdout != nil {
+			fmt.Fprintln(o.Stdout, "(если apt занят другим процессом, например unattended-upgrades, жду освобождения блокировки до 15 минут)")
+		}
+	}
 	if o.User != "" {
 		args = append([]string{"-u", o.User, "--", name}, args...)
 		name = "runuser"
