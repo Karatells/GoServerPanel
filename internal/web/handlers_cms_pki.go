@@ -16,6 +16,7 @@ import (
 	"goserverpanel/internal/databases"
 	"goserverpanel/internal/installer"
 	"goserverpanel/internal/nginx"
+	"goserverpanel/internal/pki"
 	"goserverpanel/internal/store"
 )
 
@@ -165,27 +166,69 @@ func (a *App) handlePKI(w http.ResponseWriter, r *http.Request) {
 	if certs == nil {
 		certs = []store.CertMeta{}
 	}
-	writeJSON(w, 200, map[string]any{"ca": a.PKI.Info(), "certs": certs})
+	for i := range certs { // для UI устаревшие сертификаты привязываем к CA "default"
+		certs[i].CAID = pki.CAOf(certs[i])
+	}
+	writeJSON(w, 200, map[string]any{"cas": a.PKI.ListCAs(), "certs": certs})
 }
 
 func (a *App) handlePKICreateCA(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		CN, Org string
-		Years   int
+		Name, CN, Org string
+		Years         int
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if err := a.PKI.CreateCA(in.CN, in.Org, in.Years); err != nil {
+	info, err := a.PKI.CreateCA(in.Name, in.CN, in.Org, in.Years)
+	if err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
-	a.audit(r, "pki.ca.create", in.CN)
-	writeJSON(w, 201, a.PKI.Info())
+	a.audit(r, "pki.ca.create", info.Name+" #"+info.ID)
+	writeJSON(w, 201, info)
+}
+
+// handlePKIImportCA загружает собственный корневой сертификат и его закрытый ключ.
+func (a *App) handlePKIImportCA(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Name, Cert, Key string }
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	if !decode(w, r, &in) {
+		return
+	}
+	info, err := a.PKI.ImportCA(in.Name, in.Cert, in.Key)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	a.audit(r, "pki.ca.import", info.Name+" #"+info.ID)
+	writeJSON(w, 201, info)
+}
+
+func (a *App) handlePKIDeleteCA(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	n := 0
+	a.Store.View(func(d *store.Data) {
+		for _, c := range d.Certs {
+			if pki.CAOf(c) == id {
+				n++
+			}
+		}
+	})
+	if n > 0 {
+		fail(w, 400, fmt.Sprintf("у этого CA есть выпущенные сертификаты (%d) — сначала удалите их", n))
+		return
+	}
+	if err := a.PKI.DeleteCA(id); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	a.audit(r, "pki.ca.delete", "#"+id)
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (a *App) handlePKICACert(w http.ResponseWriter, r *http.Request) {
-	b, err := a.PKI.CACertPEM()
+	b, err := a.PKI.CACertPEM(r.PathValue("id"))
 	if err != nil {
 		fail(w, 404, err.Error())
 		return
@@ -198,9 +241,9 @@ func (a *App) handlePKICACert(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePKICRL(w http.ResponseWriter, r *http.Request) {
 	var certs []store.CertMeta
 	a.Store.View(func(d *store.Data) { certs = append(certs, d.Certs...) })
-	b, err := a.PKI.CRL(certs)
+	b, err := a.PKI.CRL(r.PathValue("id"), certs)
 	if err != nil {
-		fail(w, 404, err.Error())
+		fail(w, 400, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
@@ -210,6 +253,7 @@ func (a *App) handlePKICRL(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handlePKIIssue(w http.ResponseWriter, r *http.Request) {
 	var in struct {
+		CAID   string `json:"ca_id"`
 		Domain string
 		SANs   []string
 		Days   int
@@ -217,13 +261,21 @@ func (a *App) handlePKIIssue(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	meta, err := a.PKI.Issue(in.Domain, in.SANs, in.Days)
+	if in.CAID == "" {
+		cas := a.PKI.ListCAs()
+		if len(cas) != 1 {
+			fail(w, 400, "выберите корневой сертификат (CA)")
+			return
+		}
+		in.CAID = cas[0].ID
+	}
+	meta, err := a.PKI.Issue(in.CAID, in.Domain, in.SANs, in.Days)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
 	_ = a.Store.Update(func(d *store.Data) error { d.Certs = append(d.Certs, meta); return nil })
-	a.audit(r, "pki.issue", meta.Domain+" #"+meta.Serial)
+	a.audit(r, "pki.issue", meta.Domain+" #"+meta.Serial+" (CA "+meta.CAID+")")
 	writeJSON(w, 201, meta)
 }
 

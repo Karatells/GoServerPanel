@@ -424,31 +424,59 @@ async function pageDB(main) {
 // ---------- PKI ----------
 async function pagePKI(main) {
   const body = h('div');
-  main.append(h('h1', {}, 'SSL / PKI'), body);
+  main.append(body);
+  const dl = (href, label) => h('a', { class: 'btn sm', href, style: 'text-decoration:none' }, label);
   async function load() {
     const d = await api('GET', '/pki');
-    const caCard = d.ca.exists ?
-      h('div', { class: 'card' }, h('h2', {}, 'Корневой сертификат (Root CA)'), h('div', {}, d.ca.subject), h('div', { class: 'muted small' }, 'Действителен до ' + fmtDate(d.ca.not_after)), h('div', { class: 'mono small muted', style: 'word-break:break-all' }, 'SHA-256: ' + d.ca.fingerprint),
-        h('div', { class: 'row', style: 'margin-top:10px' }, h('a', { class: 'btn', href: '/api/pki/ca.crt', style: 'text-decoration:none' }, 'Скачать ca.crt'), h('a', { class: 'btn', href: '/api/pki/crl', style: 'text-decoration:none' }, 'Скачать CRL'))) :
-      h('div', { class: 'card' }, h('h2', {}, 'Корневой сертификат не создан'), h('p', { class: 'muted' }, 'Создайте собственный Root CA, чтобы выпускать сертификаты для локальной разработки и закрытого контура.'), h('button', { class: 'primary', onclick: createCA }, 'Создать Root CA'));
-    const certs = h('div', { class: 'card' }, h('div', { class: 'row sp' }, h('h2', {}, 'Выпущенные сертификаты'), d.ca.exists ? h('button', { class: 'primary sm', onclick: issue }, '+ Выпустить') : null),
-      d.certs.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Домен', 'SAN', 'До', 'Статус', ''].map(x => h('th', {}, x)))), h('tbody', {}, d.certs.map(c => h('tr', {},
-        h('td', {}, h('b', {}, c.domain)), h('td', { class: 'small muted' }, (c.sans || []).join(', ')), h('td', {}, new Date(c.not_after).toLocaleDateString('ru-RU')),
+    const caName = id => (d.cas.find(c => c.id === id) || { name: id }).name;
+    const head = h('div', { class: 'row sp page-h' }, h('h1', {}, 'SSL / PKI'), h('div', { class: 'row' },
+      h('button', { onclick: importCA }, 'Загрузить свой CA'), h('button', { class: 'primary', onclick: createCA }, '+ Создать CA')));
+
+    const caCards = d.cas.length ?
+      h('div', { class: 'grid' }, d.cas.map(c => h('div', { class: 'card' },
+        h('div', { class: 'row sp' }, h('h2', { style: 'margin:0' }, c.name), h('span', { class: 'badge' + (c.expired ? ' err' : ''), }, c.expired ? 'истёк' : (c.imported ? 'импортирован' : 'создан панелью'))),
+        h('div', { class: 'small', style: 'margin-top:8px;word-break:break-word' }, c.subject),
+        h('div', { class: 'muted small' }, c.key_type + ' · до ' + new Date(c.not_after).toLocaleDateString('ru-RU')),
+        h('div', { class: 'mono small muted', style: 'word-break:break-all;margin-top:6px' }, 'SHA-256: ' + c.fingerprint),
+        h('div', { class: 'row', style: 'margin-top:12px' }, dl('/api/pki/cas/' + c.id + '/ca.crt', 'ca.crt'), dl('/api/pki/cas/' + c.id + '/crl', 'CRL'),
+          h('button', { class: 'sm danger', onclick: () => confirmBox('Удалить CA «' + c.name + '» вместе с его закрытым ключом? Это действие необратимо.', async () => { await api('DELETE', '/pki/cas/' + c.id); load(); }) }, 'Удалить'))))) :
+      h('div', { class: 'card empty' }, icon('shield', 36), h('h2', {}, 'Корневых сертификатов пока нет'),
+        h('p', { class: 'muted' }, 'Создайте новый Root CA или загрузите свой (сертификат + закрытый ключ), чтобы выпускать сертификаты для локальной разработки и закрытого контура.'),
+        h('div', { class: 'row', style: 'justify-content:center' }, h('button', { class: 'primary', onclick: createCA }, 'Создать Root CA'), h('button', { onclick: importCA }, 'Загрузить свой CA')));
+
+    const certs = h('div', { class: 'card' }, h('div', { class: 'row sp' }, h('h2', {}, 'Выпущенные сертификаты'), d.cas.length ? h('button', { class: 'primary sm', onclick: issue }, '+ Выпустить') : null),
+      d.certs.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Домен', 'SAN', 'CA', 'До', 'Статус', ''].map(x => h('th', {}, x)))), h('tbody', {}, d.certs.map(c => h('tr', {},
+        h('td', {}, h('b', {}, c.domain)), h('td', { class: 'small muted' }, (c.sans || []).join(', ')), h('td', { class: 'small' }, caName(c.ca_id)), h('td', {}, new Date(c.not_after).toLocaleDateString('ru-RU')),
         h('td', {}, h('span', { class: 'badge ' + (c.revoked ? 'err' : 'ok') }, c.revoked ? 'отозван' : 'действует')),
-        h('td', { class: 'row' }, h('a', { class: 'btn sm', href: `/api/pki/certs/${c.serial}/download`, style: 'text-decoration:none' }, 'PEM'),
+        h('td', { class: 'row' }, dl(`/api/pki/certs/${c.serial}/download`, 'PEM'),
           c.revoked ? null : h('button', { class: 'sm', onclick: () => confirmBox('Отозвать сертификат ' + c.domain + '? Он будет снят с сайтов.', async () => { await api('POST', `/pki/certs/${c.serial}/revoke`); load(); }, 'Отозвать') }, 'Отозвать'),
           h('button', { class: 'sm danger', onclick: () => confirmBox('Удалить сертификат ' + c.domain + '?', async () => { await api('DELETE', `/pki/certs/${c.serial}`); load(); }) }, 'Удалить')))))) : h('div', { class: 'muted' }, 'Сертификатов нет'));
-    body.replaceChildren(caCard, certs);
+    body.replaceChildren(head, caCards, d.cas.length ? certs : null);
+    window.__cas = d.cas;
   }
   function createCA() {
-    const cn = h('input', { value: 'GoServerPanel Root CA' }), org = h('input', { placeholder: 'Организация' }), years = h('input', { value: '10', type: 'number' });
-    modal('Создание Root CA', h('div', {}, field('Common Name', cn), field('Организация', org), field('Срок, лет', years), h('p', { class: 'muted small' }, 'Генерация RSA-4096 может занять несколько секунд.')),
-      [{ label: 'Отмена' }, { label: 'Создать', primary: true, onclick: async () => { await api('POST', '/pki/ca', { cn: cn.value, org: org.value, years: +years.value }); load(); } }]);
+    const name = h('input', { value: 'Root CA' }), cn = h('input', { placeholder: 'пусто — как название' }), org = h('input', { placeholder: 'Организация' }), years = h('input', { value: '10', type: 'number' });
+    modal('Создание Root CA', h('div', {}, field('Название (для списка)', name), field('Common Name', cn), field('Организация', org), field('Срок, лет', years), h('p', { class: 'muted small' }, 'Генерация RSA-4096 может занять несколько секунд.')),
+      [{ label: 'Отмена' }, { label: 'Создать', primary: true, onclick: async () => { await api('POST', '/pki/cas', { name: name.value, cn: cn.value, org: org.value, years: +years.value }); load(); } }]);
+  }
+  function importCA() {
+    const name = h('input', { placeholder: 'Например: Корпоративный CA' });
+    const cert = h('textarea', { spellcheck: 'false', placeholder: '-----BEGIN CERTIFICATE-----', style: 'min-height:130px' });
+    const key = h('textarea', { spellcheck: 'false', placeholder: '-----BEGIN PRIVATE KEY-----', style: 'min-height:130px' });
+    const pick = (target) => h('input', { type: 'file', accept: '.pem,.crt,.cer,.key', style: 'margin-top:6px', onchange: async e => { const f = e.target.files[0]; if (f) target.value = await f.text(); } });
+    modal('Загрузка своего корневого сертификата', h('div', {},
+      h('p', { class: 'muted small' }, 'Нужны сертификат CA и его закрытый ключ в формате PEM (RSA, ECDSA или Ed25519; ключ без пароля). Закрытый ключ сохраняется на сервере с правами 0600 — панель подписывает им выпускаемые сертификаты.'),
+      field('Название', name),
+      h('label', { class: 'f' }, h('span', {}, 'Сертификат CA (PEM) — вставьте текст или выберите файл'), cert, pick(cert)),
+      h('label', { class: 'f' }, h('span', {}, 'Закрытый ключ (PEM)'), key, pick(key))),
+      [{ label: 'Отмена' }, { label: 'Загрузить', primary: true, onclick: async () => { await api('POST', '/pki/cas/import', { name: name.value, cert: cert.value, key: key.value }); load(); toast('Корневой сертификат добавлен'); } }], true);
   }
   function issue() {
+    const cas = window.__cas || [];
+    const ca = h('select', {}, cas.filter(c => !c.expired).map(c => h('option', { value: c.id }, c.name + ' (' + c.key_type + ')')));
     const dom = h('input', { placeholder: 'dev.local' }), sans = h('input', { placeholder: 'www.dev.local, 192.168.1.10' }), days = h('input', { value: '397', type: 'number' });
-    modal('Выпуск сертификата', h('div', {}, field('Домен', dom), field('Дополнительные SAN (через запятую)', sans), field('Срок, дней (до 825)', days)),
-      [{ label: 'Отмена' }, { label: 'Выпустить', primary: true, onclick: async () => { await api('POST', '/pki/certs', { domain: dom.value, sans: sans.value.split(',').map(x => x.trim()).filter(Boolean), days: +days.value }); load(); toast('Выпущен. Назначьте его сайту в разделе «Веб-сайты».'); } }]);
+    modal('Выпуск сертификата', h('div', {}, field('Корневой сертификат (CA)', ca), field('Домен', dom), field('Дополнительные SAN (через запятую)', sans), field('Срок, дней (до 825; не дольше срока CA)', days)),
+      [{ label: 'Отмена' }, { label: 'Выпустить', primary: true, onclick: async () => { await api('POST', '/pki/certs', { ca_id: ca.value, domain: dom.value, sans: sans.value.split(',').map(x => x.trim()).filter(Boolean), days: +days.value }); load(); toast('Выпущен. Назначьте его сайту в разделе «Веб-сайты».'); } }]);
   }
   await load();
 }

@@ -54,6 +54,7 @@ type Site struct {
 
 type CertMeta struct {
 	Serial    string    `json:"serial"`
+	CAID      string    `json:"ca_id"` // пусто — устаревший единственный CA ("default")
 	Domain    string    `json:"domain"`
 	SANs      []string  `json:"sans"`
 	NotBefore time.Time `json:"not_before"`

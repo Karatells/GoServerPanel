@@ -1,15 +1,21 @@
-// Package pki: встроенный Удостоверяющий Центр (Root CA) на crypto/x509.
-// Корневой ключ хранится в DataDir/pki/ca.key (0600). Доменные сертификаты выпускаются
-// через CSR → подпись корневым ключом; поддерживается отзыв и CRL.
+// Package pki: встроенный Удостоверяющий Центр на crypto/x509.
+//
+// Поддерживается несколько корневых CA: созданных панелью (RSA-4096) и импортированных
+// (свой сертификат + закрытый ключ; RSA, ECDSA, Ed25519). Каждый CA хранится в
+// DataDir/pki/cas/<id>/{ca.crt,ca.key,meta.json}. Доменные сертификаты выпускаются
+// через CSR → подпись выбранным CA; поддерживаются отзыв и CRL для каждого CA.
 package pki
 
 import (
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,6 +23,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,28 +33,80 @@ import (
 	"goserverpanel/internal/store"
 )
 
+const (
+	// LegacyCAID — идентификатор CA, созданного версиями панели с единственным CA.
+	LegacyCAID = "default"
+	maxPEMSize = 64 << 10
+)
+
+var idRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+
 type PKI struct {
 	dir string
 	mu  sync.Mutex
 }
 
 type CAInfo struct {
-	Exists      bool      `json:"exists"`
-	Subject     string    `json:"subject,omitempty"`
-	NotBefore   time.Time `json:"not_before,omitempty"`
-	NotAfter    time.Time `json:"not_after,omitempty"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Subject     string    `json:"subject"`
+	NotBefore   time.Time `json:"not_before"`
+	NotAfter    time.Time `json:"not_after"`
+	Fingerprint string    `json:"fingerprint"`
+	KeyType     string    `json:"key_type"`
+	Imported    bool      `json:"imported"`
+	Expired     bool      `json:"expired"`
 }
 
-func New(dataDir string) *PKI { return &PKI{dir: filepath.Join(dataDir, "pki")} }
+type caMeta struct {
+	Name     string    `json:"name"`
+	Imported bool      `json:"imported"`
+	Created  time.Time `json:"created"`
+}
 
-func (p *PKI) caCertPath() string { return filepath.Join(p.dir, "ca.crt") }
-func (p *PKI) caKeyPath() string  { return filepath.Join(p.dir, "ca.key") }
+// CAOf возвращает идентификатор CA сертификата (пустой — устаревший единственный CA).
+func CAOf(c store.CertMeta) string {
+	if c.CAID == "" {
+		return LegacyCAID
+	}
+	return c.CAID
+}
 
-func (p *PKI) HasCA() bool {
-	_, e1 := os.Stat(p.caCertPath())
-	_, e2 := os.Stat(p.caKeyPath())
-	return e1 == nil && e2 == nil
+func New(dataDir string) *PKI {
+	p := &PKI{dir: filepath.Join(dataDir, "pki")}
+	p.migrate()
+	return p
+}
+
+// migrate переносит единственный CA старого формата (pki/ca.crt, pki/ca.key) в pki/cas/default.
+func (p *PKI) migrate() {
+	oldCert, oldKey := filepath.Join(p.dir, "ca.crt"), filepath.Join(p.dir, "ca.key")
+	if _, err := os.Stat(oldCert); err != nil {
+		return
+	}
+	dst := filepath.Join(p.dir, "cas", LegacyCAID)
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	if os.MkdirAll(dst, 0o700) != nil {
+		return
+	}
+	if os.Rename(oldCert, filepath.Join(dst, "ca.crt")) != nil || os.Rename(oldKey, filepath.Join(dst, "ca.key")) != nil {
+		return
+	}
+	p.writeMeta(dst, caMeta{Name: "Root CA", Created: time.Now()})
+}
+
+func (p *PKI) writeMeta(dir string, m caMeta) {
+	b, _ := json.Marshal(m)
+	_ = os.WriteFile(filepath.Join(dir, "meta.json"), b, 0o600)
+}
+
+func (p *PKI) caDir(id string) (string, error) {
+	if !idRe.MatchString(id) {
+		return "", errors.New("некорректный идентификатор CA")
+	}
+	return filepath.Join(p.dir, "cas", id), nil
 }
 
 func randSerial() (*big.Int, error) {
@@ -57,33 +117,179 @@ func writePEM(path, typ string, der []byte, mode os.FileMode) error {
 	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode)
 }
 
-// CreateCA генерирует самоподписанный корневой сертификат (RSA-4096). Повторно — ошибка.
-func (p *PKI) CreateCA(cn, org string, years int) error {
+func keyType(pub crypto.PublicKey) string {
+	switch k := pub.(type) {
+	case *rsa.PublicKey:
+		return fmt.Sprintf("RSA-%d", k.N.BitLen())
+	case *ecdsa.PublicKey:
+		return "ECDSA-" + k.Curve.Params().Name
+	case ed25519.PublicKey:
+		return "Ed25519"
+	}
+	return "unknown"
+}
+
+func infoOf(id string, m caMeta, cert *x509.Certificate) CAInfo {
+	return CAInfo{
+		ID: id, Name: m.Name, Subject: cert.Subject.String(), NotBefore: cert.NotBefore, NotAfter: cert.NotAfter,
+		Fingerprint: fingerprint(cert.Raw), KeyType: keyType(cert.PublicKey), Imported: m.Imported, Expired: time.Now().After(cert.NotAfter),
+	}
+}
+
+func (p *PKI) readMeta(dir string) caMeta {
+	var m caMeta
+	if b, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	if m.Name == "" {
+		m.Name = "Root CA"
+	}
+	return m
+}
+
+func readCert(path string) (*x509.Certificate, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return nil, errors.New("повреждённый сертификат CA")
+	}
+	return x509.ParseCertificate(blk.Bytes)
+}
+
+// parsePrivateKey разбирает PKCS#1 / PKCS#8 / SEC1 ключ из PEM. Зашифрованные ключи не поддерживаются.
+func parsePrivateKey(data []byte) (crypto.Signer, error) {
+	for {
+		var blk *pem.Block
+		blk, data = pem.Decode(data)
+		if blk == nil {
+			return nil, errors.New("в файле ключа не найден PEM-блок закрытого ключа")
+		}
+		if strings.Contains(blk.Type, "ENCRYPTED") || blk.Headers["DEK-Info"] != "" {
+			return nil, errors.New("ключ защищён паролем — снимите пароль (openssl pkey -in key.pem -out key-nopass.pem) и загрузите снова")
+		}
+		switch blk.Type {
+		case "RSA PRIVATE KEY":
+			return x509.ParsePKCS1PrivateKey(blk.Bytes)
+		case "EC PRIVATE KEY":
+			return x509.ParseECPrivateKey(blk.Bytes)
+		case "PRIVATE KEY":
+			k, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			s, ok := k.(crypto.Signer)
+			if !ok {
+				return nil, errors.New("неподдерживаемый тип ключа")
+			}
+			return s, nil
+		}
+	}
+}
+
+func (p *PKI) loadCA(id string) (*x509.Certificate, crypto.Signer, error) {
+	dir, err := p.caDir(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert, err := readCert(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		return nil, nil, errors.New("CA не найден")
+	}
+	kb, err := os.ReadFile(filepath.Join(dir, "ca.key"))
+	if err != nil {
+		return nil, nil, err
+	}
+	key, err := parsePrivateKey(kb)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cert, key, nil
+}
+
+// ListCAs возвращает все корневые сертификаты, отсортированные по имени.
+func (p *PKI) ListCAs() []CAInfo {
+	out := []CAInfo{}
+	ents, _ := os.ReadDir(filepath.Join(p.dir, "cas"))
+	for _, e := range ents {
+		if !e.IsDir() || !idRe.MatchString(e.Name()) {
+			continue
+		}
+		dir := filepath.Join(p.dir, "cas", e.Name())
+		cert, err := readCert(filepath.Join(dir, "ca.crt"))
+		if err != nil {
+			continue
+		}
+		out = append(out, infoOf(e.Name(), p.readMeta(dir), cert))
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
+	return out
+}
+
+func (p *PKI) Info(id string) (CAInfo, error) {
+	dir, err := p.caDir(id)
+	if err != nil {
+		return CAInfo{}, err
+	}
+	cert, err := readCert(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		return CAInfo{}, errors.New("CA не найден")
+	}
+	return infoOf(id, p.readMeta(dir), cert), nil
+}
+
+func cleanName(name, fallback string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = fallback
+	}
+	if len(name) > 80 || strings.ContainsAny(name, "\n\r\t") {
+		return "", errors.New("некорректное название CA (до 80 символов)")
+	}
+	return name, nil
+}
+
+func (p *PKI) newCADir() (id, dir string, err error) {
+	id = store.NewID()
+	dir = filepath.Join(p.dir, "cas", id)
+	err = os.MkdirAll(dir, 0o700)
+	return
+}
+
+// CreateCA генерирует самоподписанный корневой сертификат (RSA-4096).
+func (p *PKI) CreateCA(name, cn, org string, years int) (CAInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.HasCA() {
-		return errors.New("корневой сертификат уже существует")
+	name, err := cleanName(name, "Root CA")
+	if err != nil {
+		return CAInfo{}, err
 	}
 	if cn == "" {
-		cn = "GoServerPanel Root CA"
+		cn = name
 	}
 	if len(cn) > 100 || len(org) > 100 {
-		return errors.New("слишком длинное имя")
+		return CAInfo{}, errors.New("слишком длинное имя")
 	}
 	if years < 1 || years > 30 {
 		years = 10
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
-		return err
+		return CAInfo{}, err
 	}
 	serial, err := randSerial()
 	if err != nil {
-		return err
+		return CAInfo{}, err
+	}
+	subj := pkix.Name{CommonName: cn}
+	if org != "" {
+		subj.Organization = []string{org}
 	}
 	tpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: cn, Organization: []string{org}},
+		Subject:               subj,
 		NotBefore:             time.Now().Add(-5 * time.Minute),
 		NotAfter:              time.Now().AddDate(years, 0, 0),
 		IsCA:                  true,
@@ -93,60 +299,126 @@ func (p *PKI) CreateCA(cn, org string, years int) error {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
-		return err
+		return CAInfo{}, err
 	}
-	if err := os.MkdirAll(p.dir, 0o700); err != nil {
-		return err
+	kd, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return CAInfo{}, err
 	}
-	if err := writePEM(p.caKeyPath(), "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key), 0o600); err != nil {
-		return err
+	id, dir, err := p.newCADir()
+	if err != nil {
+		return CAInfo{}, err
 	}
-	return writePEM(p.caCertPath(), "CERTIFICATE", der, 0o644)
+	if err := writePEM(filepath.Join(dir, "ca.key"), "PRIVATE KEY", kd, 0o600); err != nil {
+		return CAInfo{}, err
+	}
+	if err := writePEM(filepath.Join(dir, "ca.crt"), "CERTIFICATE", der, 0o644); err != nil {
+		return CAInfo{}, err
+	}
+	p.writeMeta(dir, caMeta{Name: name, Created: time.Now()})
+	return p.Info(id)
 }
 
-func (p *PKI) loadCA() (*x509.Certificate, *rsa.PrivateKey, error) {
-	cb, err := os.ReadFile(p.caCertPath())
+// ImportCA добавляет собственный корневой сертификат вместе с закрытым ключом.
+// Проверяется: сертификат — CA, не просрочен, ключ расшифрован и соответствует сертификату.
+func (p *PKI) ImportCA(name, certPEM, keyPEM string) (CAInfo, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	name, err := cleanName(name, "Imported CA")
 	if err != nil {
-		return nil, nil, errors.New("корневой сертификат не создан")
+		return CAInfo{}, err
 	}
-	kb, err := os.ReadFile(p.caKeyPath())
+	if len(certPEM) > maxPEMSize || len(keyPEM) > maxPEMSize {
+		return CAInfo{}, errors.New("файл слишком большой")
+	}
+	var cert *x509.Certificate
+	rest := []byte(certPEM)
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if blk.Type == "CERTIFICATE" {
+			if cert, err = x509.ParseCertificate(blk.Bytes); err != nil {
+				return CAInfo{}, fmt.Errorf("не удалось разобрать сертификат: %w", err)
+			}
+			break
+		}
+	}
+	if cert == nil {
+		return CAInfo{}, errors.New("в сертификате не найден PEM-блок CERTIFICATE")
+	}
+	if !cert.BasicConstraintsValid || !cert.IsCA {
+		return CAInfo{}, errors.New("это не сертификат CA (в нём нет basicConstraints: CA:TRUE)")
+	}
+	if cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return CAInfo{}, errors.New("сертификату запрещено подписывать другие сертификаты (keyUsage без keyCertSign)")
+	}
+	if time.Now().After(cert.NotAfter) {
+		return CAInfo{}, errors.New("срок действия сертификата истёк")
+	}
+	key, err := parsePrivateKey([]byte(keyPEM))
 	if err != nil {
-		return nil, nil, err
+		return CAInfo{}, err
 	}
-	cblk, _ := pem.Decode(cb)
-	kblk, _ := pem.Decode(kb)
-	if cblk == nil || kblk == nil {
-		return nil, nil, errors.New("повреждённые файлы CA")
+	pub, ok := key.Public().(interface{ Equal(crypto.PublicKey) bool })
+	if !ok || !pub.Equal(cert.PublicKey) {
+		return CAInfo{}, errors.New("закрытый ключ не соответствует сертификату")
 	}
-	cert, err := x509.ParseCertificate(cblk.Bytes)
+	fp := fingerprint(cert.Raw)
+	for _, c := range p.ListCAs() {
+		if c.Fingerprint == fp {
+			return CAInfo{}, fmt.Errorf("этот сертификат уже добавлен как «%s»", c.Name)
+		}
+	}
+	kd, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return nil, nil, err
+		return CAInfo{}, err
 	}
-	key, err := x509.ParsePKCS1PrivateKey(kblk.Bytes)
+	id, dir, err := p.newCADir()
 	if err != nil {
-		return nil, nil, err
+		return CAInfo{}, err
 	}
-	return cert, key, nil
+	if err := writePEM(filepath.Join(dir, "ca.key"), "PRIVATE KEY", kd, 0o600); err != nil {
+		os.RemoveAll(dir)
+		return CAInfo{}, err
+	}
+	if err := writePEM(filepath.Join(dir, "ca.crt"), "CERTIFICATE", cert.Raw, 0o644); err != nil {
+		os.RemoveAll(dir)
+		return CAInfo{}, err
+	}
+	p.writeMeta(dir, caMeta{Name: name, Imported: true, Created: time.Now()})
+	return p.Info(id)
 }
 
-func (p *PKI) CACertPEM() ([]byte, error) {
-	b, err := os.ReadFile(p.caCertPath())
+// DeleteCA удаляет CA вместе с его закрытым ключом (проверка зависимых сертификатов — на вызывающей стороне).
+func (p *PKI) DeleteCA(id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dir, err := p.caDir(id)
 	if err != nil {
-		return nil, errors.New("корневой сертификат не создан")
+		return err
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return errors.New("CA не найден")
+	}
+	return os.RemoveAll(dir)
+}
+
+func (p *PKI) CACertPEM(id string) ([]byte, error) {
+	dir, err := p.caDir(id)
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		return nil, errors.New("CA не найден")
 	}
 	return b, nil
 }
 
-func (p *PKI) Info() CAInfo {
-	cert, _, err := p.loadCA()
-	if err != nil {
-		return CAInfo{}
-	}
-	return CAInfo{Exists: true, Subject: cert.Subject.String(), NotBefore: cert.NotBefore, NotAfter: cert.NotAfter, Fingerprint: fingerprint(cert.Raw)}
-}
-
 func fingerprint(der []byte) string {
-	// SHA-256 в виде AA:BB:…
 	h := sha256Sum(der)
 	parts := make([]string, len(h))
 	for i, b := range h {
@@ -155,14 +427,18 @@ func fingerprint(der []byte) string {
 	return strings.Join(parts, ":")
 }
 
-// Issue выпускает сертификат для домена (+SAN). Возвращает метаданные.
-func (p *PKI) Issue(domain string, sans []string, days int) (store.CertMeta, error) {
+// Issue выпускает сертификат для домена (+SAN), подписанный выбранным CA.
+func (p *PKI) Issue(caID, domain string, sans []string, days int) (store.CertMeta, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var meta store.CertMeta
-	caCert, caKey, err := p.loadCA()
+	caCert, caKey, err := p.loadCA(caID)
 	if err != nil {
 		return meta, err
+	}
+	now := time.Now()
+	if now.After(caCert.NotAfter) {
+		return meta, errors.New("срок действия выбранного CA истёк")
 	}
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if !nginx.DomainRe.MatchString(domain) && net.ParseIP(domain) == nil {
@@ -192,8 +468,6 @@ func (p *PKI) Issue(domain string, sans []string, days int) (store.CertMeta, err
 	if err != nil {
 		return meta, err
 	}
-	// CSR → подпись (CSR-шаг сохраняет модель «запрос → CA подписывает»).
-	csrTpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: domain}}
 	var ips []net.IP
 	var dns []string
 	for _, n := range names {
@@ -203,8 +477,9 @@ func (p *PKI) Issue(domain string, sans []string, days int) (store.CertMeta, err
 			dns = append(dns, n)
 		}
 	}
-	csrTpl.DNSNames, csrTpl.IPAddresses = dns, ips
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTpl, leafKey)
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: domain}, DNSNames: dns, IPAddresses: ips,
+	}, leafKey)
 	if err != nil {
 		return meta, err
 	}
@@ -219,14 +494,17 @@ func (p *PKI) Issue(domain string, sans []string, days int) (store.CertMeta, err
 	if err != nil {
 		return meta, err
 	}
-	now := time.Now()
+	notAfter := now.AddDate(0, 0, days)
+	if notAfter.After(caCert.NotAfter) {
+		notAfter = caCert.NotAfter // сертификат не может жить дольше CA
+	}
 	tpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               csr.Subject,
 		DNSNames:              csr.DNSNames,
 		IPAddresses:           csr.IPAddresses,
 		NotBefore:             now.Add(-5 * time.Minute),
-		NotAfter:              now.AddDate(0, 0, days),
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -248,7 +526,7 @@ func (p *PKI) Issue(domain string, sans []string, days int) (store.CertMeta, err
 	if err := writePEM(filepath.Join(dir, "key.pem"), "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(leafKey), 0o600); err != nil {
 		return meta, err
 	}
-	return store.CertMeta{Serial: hexSerial, Domain: domain, SANs: names, NotBefore: tpl.NotBefore, NotAfter: tpl.NotAfter}, nil
+	return store.CertMeta{Serial: hexSerial, CAID: caID, Domain: domain, SANs: names, NotBefore: tpl.NotBefore, NotAfter: tpl.NotAfter}, nil
 }
 
 // Paths возвращает пути к цепочке и ключу выпущенного сертификата.
@@ -270,17 +548,20 @@ func (p *PKI) RemoveFiles(serial string) error {
 	return os.RemoveAll(filepath.Join(p.dir, "issued", serial))
 }
 
-// CRL формирует список отозванных сертификатов, подписанный корневым ключом.
-func (p *PKI) CRL(certs []store.CertMeta) ([]byte, error) {
+// CRL формирует список отозванных сертификатов выбранного CA, подписанный его ключом.
+func (p *PKI) CRL(caID string, certs []store.CertMeta) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	caCert, caKey, err := p.loadCA()
+	caCert, caKey, err := p.loadCA(caID)
 	if err != nil {
 		return nil, err
 	}
+	if caCert.KeyUsage != 0 && caCert.KeyUsage&x509.KeyUsageCRLSign == 0 {
+		return nil, errors.New("сертификат этого CA не разрешает подпись CRL (keyUsage без cRLSign)")
+	}
 	var entries []x509.RevocationListEntry
 	for _, c := range certs {
-		if !c.Revoked {
+		if !c.Revoked || CAOf(c) != caID {
 			continue
 		}
 		n, ok := new(big.Int).SetString(c.Serial, 16)

@@ -2,7 +2,14 @@ package web
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"goserverpanel/internal/auth"
 	"goserverpanel/internal/config"
@@ -181,14 +189,39 @@ func TestSiteLifecycle(t *testing.T) {
 func TestPKIFlowAndSiteAssignment(t *testing.T) {
 	e := newEnv(t)
 	c := e.login("admin")
-	if code, _, _ := e.call("POST", "/api/pki/ca", map[string]any{"cn": "T CA", "years": 2}, c, nil); code != 201 {
-		t.Fatalf("CA: %d", code)
+	if code, _, _ := e.call("POST", "/api/pki/certs", map[string]any{"domain": "dev.local"}, c, nil); code != 400 {
+		t.Fatalf("issue without any CA must fail, got %d", code)
 	}
-	code, cert, _ := e.call("POST", "/api/pki/certs", map[string]any{"domain": "dev.local", "days": 30}, c, nil)
+	code, ca1, _ := e.call("POST", "/api/pki/cas", map[string]any{"name": "CA One", "cn": "T CA", "years": 2}, c, nil)
 	if code != 201 {
+		t.Fatalf("CA: %d %v", code, ca1)
+	}
+	// второй CA — импортированный
+	ext, extKey := externalCA(t)
+	code, ca2, _ := e.call("POST", "/api/pki/cas/import", map[string]any{"name": "Corp", "cert": ext, "key": extKey}, c, nil)
+	if code != 201 || ca2["imported"] != true {
+		t.Fatalf("import: %d %v", code, ca2)
+	}
+	if code, _, _ := e.call("POST", "/api/pki/cas/import", map[string]any{"name": "dup", "cert": ext, "key": extKey}, c, nil); code != 400 {
+		t.Errorf("duplicate import must fail, got %d", code)
+	}
+	code, list, _ := e.call("GET", "/api/pki", nil, c, nil)
+	if code != 200 || len(list["cas"].([]any)) != 2 {
+		t.Fatalf("expected two CAs: %v", list)
+	}
+	// при двух CA выбор обязателен
+	if code, _, _ := e.call("POST", "/api/pki/certs", map[string]any{"domain": "dev.local"}, c, nil); code != 400 {
+		t.Errorf("ambiguous CA must be rejected, got %d", code)
+	}
+	code, cert, _ := e.call("POST", "/api/pki/certs", map[string]any{"ca_id": ca2["id"], "domain": "dev.local", "days": 30}, c, nil)
+	if code != 201 || cert["ca_id"] != ca2["id"] {
 		t.Fatalf("issue: %d %v", code, cert)
 	}
 	serial := cert["serial"].(string)
+	// CA с сертификатами удалить нельзя
+	if code, _, _ := e.call("DELETE", "/api/pki/cas/"+ca2["id"].(string), nil, c, nil); code != 400 {
+		t.Errorf("deleting a CA with certificates must fail, got %d", code)
+	}
 	code, site, _ := e.call("POST", "/api/sites", map[string]any{"domain": "dev.local", "cert_id": serial, "force_https": true}, c, nil)
 	if code != 201 {
 		t.Fatalf("site: %d %v", code, site)
@@ -202,6 +235,27 @@ func TestPKIFlowAndSiteAssignment(t *testing.T) {
 	if strings.Contains(string(b), "443") {
 		t.Error("revoked certificate must be detached from the site")
 	}
+	e.call("DELETE", "/api/pki/certs/"+serial, nil, c, nil)
+	if code, _, _ := e.call("DELETE", "/api/pki/cas/"+ca2["id"].(string), nil, c, nil); code != 200 {
+		t.Errorf("deleting an empty CA: %d", code)
+	}
+	// viewer не может импортировать CA
+	v := e.login("viewer")
+	if code, _, _ := e.call("POST", "/api/pki/cas/import", map[string]any{"cert": ext, "key": extKey}, v, nil); code != 403 {
+		t.Errorf("viewer import must be 403, got %d", code)
+	}
+}
+
+// externalCA возвращает PEM сертификата и ключа CA, «выпущенного вне панели».
+func externalCA(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(42), Subject: pkix.Name{CommonName: "Corp CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(3, 0, 0),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+	der, _ := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	kd, _ := x509.MarshalPKCS8PrivateKey(key)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}))
 }
 
 func TestFilesAPI(t *testing.T) {
