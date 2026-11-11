@@ -122,16 +122,15 @@ func Install(ctx context.Context, w io.Writer, run *execx.Runner, p Params) erro
 		}
 	}
 
-	if p.App.ID == "wordpress" {
-		fmt.Fprintln(w, "→ Создаю wp-config.php")
-		if err := writeWPConfig(p); err != nil {
-			return err
-		}
-	}
-
 	fmt.Fprintln(w, "→ Настраиваю права доступа")
 	if err := setPerms(p.Dir); err != nil {
 		return err
+	}
+	if p.App.ID == "wordpress" {
+		fmt.Fprintln(w, "→ Создаю wp-config.php")
+		if err := writeWPConfig(p); err != nil { // после setPerms: файл с паролем БД остаётся 0640
+			return err
+		}
 	}
 	if p.WebUser != "" {
 		if _, err := run.Do(ctx, execx.Opts{}, "chown", "-R", p.WebUser+":"+p.WebUser, p.Dir); err != nil {

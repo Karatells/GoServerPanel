@@ -59,6 +59,33 @@ func (a *App) applySite(ctx context.Context, s store.Site) (string, error) {
 	return a.Nginx.Apply(ctx, s, a.siteTLS(s), sock)
 }
 
+// ensureTraversable добавляет r-x для group/other на каждом каталоге от root вверх до www_root,
+// иначе nginx/php-fpm (www-data) не смогут дойти до файлов сайта (stat() ... Permission denied).
+func (a *App) ensureTraversable(root string) {
+	base := filepath.Clean(a.Cfg.WWWRoot)
+	for d := filepath.Clean(root); d == base || strings.HasPrefix(d, base+string(filepath.Separator)); d = filepath.Dir(d) {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			if m := st.Mode().Perm(); m&0o055 != 0o055 {
+				_ = os.Chmod(d, m|0o055)
+			}
+		}
+		if d == base {
+			break
+		}
+	}
+}
+
+// FixSitePerms исправляет права каталогов всех сайтов (вызывается при старте панели).
+func (a *App) FixSitePerms() {
+	a.Store.View(func(d *store.Data) {
+		for _, s := range d.Sites {
+			if s.Root != "" {
+				a.ensureTraversable(s.Root)
+			}
+		}
+	})
+}
+
 func (a *App) prepareRoot(root, phpVer string) error {
 	if root == "" {
 		return nil
@@ -66,6 +93,7 @@ func (a *App) prepareRoot(root, phpVer string) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
+	a.ensureTraversable(root)
 	if ents, _ := os.ReadDir(root); len(ents) == 0 {
 		page := "<!doctype html><meta charset=utf-8><title>Сайт готов</title><h1>Сайт создан в GoServerPanel</h1>\n"
 		_ = os.WriteFile(filepath.Join(root, "index.html"), []byte(page), 0o644)

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -26,6 +27,7 @@ import (
 
 type env struct {
 	t   *testing.T
+	app *App
 	srv *httptest.Server
 	cfg config.Config
 	cl  *http.Client
@@ -62,7 +64,7 @@ func newEnv(t *testing.T) *env {
 	}
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
-	return &env{t: t, srv: srv, cfg: cfg, cl: &http.Client{}}
+	return &env{t: t, app: app, srv: srv, cfg: cfg, cl: &http.Client{}}
 }
 
 func (e *env) call(method, path string, body any, cookie *http.Cookie, hdr map[string]string) (int, map[string]any, []*http.Cookie) {
@@ -183,6 +185,37 @@ func TestSiteLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(conf); err == nil {
 		t.Error("config must be removed on delete")
+	}
+}
+
+// Регрессия: при UMask=0077 (как в старом systemd-юните) каталог сайта создавался как 0700,
+// и nginx получал "stat() ... Permission denied".
+func TestSiteDirsTraversableUnderRestrictiveUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	e := newEnv(t)
+	c := e.login("admin")
+	if code, body, _ := e.call("POST", "/api/sites", map[string]any{"domain": "wp.home"}, c, nil); code != 201 {
+		t.Fatalf("create: %d %v", code, body)
+	}
+	for _, d := range []string{
+		filepath.Join(e.cfg.WWWRoot, "wp.home"),
+		filepath.Join(e.cfg.WWWRoot, "wp.home", "public_html"),
+	} {
+		st, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm()&0o055 != 0o055 {
+			t.Errorf("%s has mode %v: nginx cannot traverse it", d, st.Mode().Perm())
+		}
+	}
+	// FixSitePerms чинит уже существующие закрытые каталоги
+	d := filepath.Join(e.cfg.WWWRoot, "wp.home")
+	_ = os.Chmod(d, 0o700)
+	e.app.FixSitePerms()
+	if st, _ := os.Stat(d); st.Mode().Perm()&0o055 != 0o055 {
+		t.Errorf("FixSitePerms did not repair %s: %v", d, st.Mode().Perm())
 	}
 }
 

@@ -28,6 +28,9 @@ import (
 const version = "0.1.0"
 
 func main() {
+	// Явные права (0600/0700) на секреты заданы в коде; umask 022 нужен, чтобы каталоги сайтов
+	// и CMS не создавались закрытыми для nginx/php-fpm, даже если служба запущена с UMask=0077.
+	syscall.Umask(0o022)
 	cfgPath := flag.String("config", "config.yaml", "путь к config.yaml")
 	reset := flag.String("reset-password", "", "сбросить пароль пользователя (новый пароль будет выведен) и выйти")
 	showVer := flag.Bool("version", false, "показать версию")
@@ -95,6 +98,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	app.Mon.Start(ctx)
+	app.FixSitePerms() // чинит права каталогов сайтов, созданных старыми версиями
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

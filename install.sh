@@ -244,7 +244,6 @@ ExecStart=$BIN -config $CONF_DIR/config.yaml
 Restart=on-failure
 RestartSec=3
 User=root
-UMask=0077
 
 [Install]
 WantedBy=multi-user.target
