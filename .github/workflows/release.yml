@@ -1,0 +1,29 @@
+name: Release
+
+# Публикует бинарники, которые скачивает install.sh. Запуск: git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -ldflags="-s -w" -o dist/goserverpanel-linux-$arch ./cmd/panel
+            (cd dist && sha256sum goserverpanel-linux-$arch > goserverpanel-linux-$arch.sha256)
+          done
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
