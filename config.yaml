@@ -32,3 +32,7 @@ files_roots:
 
 # Режим отладки: изменяющие команды (apt, systemctl, nginx, СУБД) не выполняются
 dry_run: false
+
+# Обновление из панели (Настройки → Обновления). Скачивается только с GitHub Releases, проверяется sha256.
+update_check: true
+update_repo: Karatells/GoServerPanel

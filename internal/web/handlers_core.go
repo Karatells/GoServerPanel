@@ -12,6 +12,7 @@ import (
 
 	"goserverpanel/internal/auth"
 	"goserverpanel/internal/store"
+	"goserverpanel/internal/update"
 	"goserverpanel/internal/ws"
 )
 
@@ -94,7 +95,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	_, xerr := fs.Stat(a.UI, "vendor/xterm.js")
-	writeJSON(w, 200, map[string]any{"user": a.userFrom(r), "dry_run": a.Cfg.DryRun, "terminal_enabled": a.Cfg.TerminalEnabled, "xterm": xerr == nil})
+	writeJSON(w, 200, map[string]any{"user": a.userFrom(r), "dry_run": a.Cfg.DryRun, "terminal_enabled": a.Cfg.TerminalEnabled, "xterm": xerr == nil, "version": update.Current})
 }
 
 func (a *App) setUser(id string, fn func(u *store.User) error) error {

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -314,5 +315,54 @@ func TestSecurityHeadersAndUI(t *testing.T) {
 	}
 	if resp.Header.Get("Content-Security-Policy") == "" || resp.Header.Get("X-Frame-Options") != "DENY" {
 		t.Error("security headers missing")
+	}
+}
+
+func TestUpdateAPI(t *testing.T) {
+	e := newEnv(t)
+	name := "goserverpanel-linux-" + runtime.GOARCH
+	var base string
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases/latest":
+			json.NewEncoder(w).Encode(map[string]any{"tag_name": "v99.0.0", "body": "n", "html_url": "http://x", "assets": []map[string]any{
+				{"name": name, "browser_download_url": base + "/b"}, {"name": name + ".sha256", "browser_download_url": base + "/s"}}})
+		default:
+			w.Write([]byte("x"))
+		}
+	}))
+	defer gh.Close()
+	base = gh.URL
+	exe := filepath.Join(t.TempDir(), "gsp")
+	_ = os.WriteFile(exe, []byte("OLD"), 0o755)
+	e.app.Upd.APIBase, e.app.Upd.Insecure, e.app.Upd.Exe, e.app.Upd.Repo = gh.URL, true, exe, "o/r"
+	admin, viewer := e.login("admin"), e.login("viewer")
+
+	for _, p := range []string{"/api/update", "/api/update/check", "/api/update/apply", "/api/update/rollback"} {
+		m := "POST"
+		if p == "/api/update" {
+			m = "GET"
+		}
+		if code, _, _ := e.call(m, p, nil, viewer, nil); code != 403 {
+			t.Errorf("viewer %s must be 403, got %d", p, code)
+		}
+		if code, _, _ := e.call(m, p, nil, nil, nil); code != 401 {
+			t.Errorf("anonymous %s must be 401, got %d", p, code)
+		}
+	}
+	code, body, _ := e.call("POST", "/api/update/check", nil, admin, nil)
+	if code != 200 || body["available"] != true || body["latest"] != "99.0.0" {
+		t.Fatalf("check: %d %v", code, body)
+	}
+	// dry_run: задача запускается, но бинарник не меняется и перезапуска нет
+	if code, body, _ := e.call("POST", "/api/update/apply", nil, admin, nil); code != 200 && code != 202 || body["job"] == nil {
+		t.Fatalf("apply: %d %v", code, body)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if b, _ := os.ReadFile(exe); string(b) != "OLD" {
+		t.Error("dry-run apply must not modify the binary")
+	}
+	if code, _, _ := e.call("POST", "/api/update/rollback", nil, admin, nil); code != 400 {
+		t.Errorf("rollback without backup must be 400, got %d", code)
 	}
 }

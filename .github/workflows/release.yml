@@ -19,8 +19,9 @@ jobs:
       - name: Build
         run: |
           mkdir dist
+          VERSION="${GITHUB_REF_NAME#v}"
           for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -ldflags="-s -w" -o dist/goserverpanel-linux-$arch ./cmd/panel
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -ldflags="-s -w -X goserverpanel/internal/update.Current=$VERSION" -o dist/goserverpanel-linux-$arch ./cmd/panel
             (cd dist && sha256sum goserverpanel-linux-$arch > goserverpanel-linux-$arch.sha256)
           done
       - name: Publish

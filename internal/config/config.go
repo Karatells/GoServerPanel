@@ -29,6 +29,8 @@ type Config struct {
 	Shell           string
 	SessionHours    int
 	TerminalEnabled bool
+	UpdateRepo      string // GitHub-репозиторий с релизами (owner/name)
+	UpdateCheck     bool   // разрешить проверку обновлений через GitHub
 }
 
 func Default() Config {
@@ -47,6 +49,8 @@ func Default() Config {
 		Shell:           "/bin/bash",
 		SessionHours:    12,
 		TerminalEnabled: true,
+		UpdateRepo:      "Karatells/GoServerPanel",
+		UpdateCheck:     true,
 	}
 }
 
@@ -128,6 +132,8 @@ func Load(path string) (Config, error) {
 	str("php_etc_dir", &c.PHPEtcDir)
 	str("php_socket_dir", &c.PHPSocketDir)
 	str("shell", &c.Shell)
+	str("update_repo", &c.UpdateRepo)
+	boolean("update_check", &c.UpdateCheck)
 	boolean("dry_run", &c.DryRun)
 	boolean("terminal_enabled", &c.TerminalEnabled)
 	if v, ok := kv["session_hours"]; ok && len(v) == 1 {

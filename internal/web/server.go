@@ -27,6 +27,7 @@ import (
 	"goserverpanel/internal/pki"
 	"goserverpanel/internal/store"
 	"goserverpanel/internal/system"
+	"goserverpanel/internal/update"
 	"goserverpanel/internal/ws"
 )
 
@@ -41,6 +42,7 @@ type App struct {
 	PKI   *pki.PKI
 	Mon   *system.Monitor
 	Files *files.Manager
+	Upd   *update.Updater
 	UI    fs.FS
 
 	cidrs []*net.IPNet
@@ -73,6 +75,7 @@ func New(cfg *config.Config, st *store.Store, ui fs.FS) (*App, error) {
 		PKI:       pki.New(cfg.DataDir),
 		Mon:       system.NewMonitor(run, []string{"/", cfg.WWWRoot}),
 		Files:     files.New(cfg.FilesRoots),
+		Upd:       update.New(cfg.UpdateRepo, cfg.UpdateCheck),
 		attempts:  map[string]*attempt{},
 		revoked:   map[string]int64{},
 		termToken: map[string]termGrant{},
@@ -290,6 +293,10 @@ func (a *App) Handler() http.Handler {
 	r("DELETE /api/users/{id}", lvlAdmin, a.handleUserDelete)
 	r("GET /api/audit", lvlAdmin, a.handleAudit)
 
+	r("GET /api/update", lvlAdmin, a.handleUpdateInfo)
+	r("POST /api/update/check", lvlAdmin, a.handleUpdateCheck)
+	r("POST /api/update/apply", lvlAdmin, a.handleUpdateApply)
+	r("POST /api/update/rollback", lvlAdmin, a.handleUpdateRollback)
 	r("GET /api/stats", lvlAny, a.handleStats)
 	r("GET /api/ws/stats", lvlAny, a.handleStatsWS)
 	r("GET /api/services", lvlAny, a.handleServices)

@@ -21,11 +21,10 @@ import (
 	"goserverpanel/internal/config"
 	"goserverpanel/internal/pki"
 	"goserverpanel/internal/store"
+	"goserverpanel/internal/update"
 	"goserverpanel/internal/web"
 	"goserverpanel/ui"
 )
-
-const version = "0.1.0"
 
 func main() {
 	// Явные права (0600/0700) на секреты заданы в коде; umask 022 нужен, чтобы каталоги сайтов
@@ -36,7 +35,7 @@ func main() {
 	showVer := flag.Bool("version", false, "показать версию")
 	flag.Parse()
 	if *showVer {
-		fmt.Println("goserverpanel", version)
+		fmt.Println("goserverpanel", update.Current)
 		return
 	}
 
@@ -116,7 +115,7 @@ func main() {
 	if cfg.DryRun {
 		log.Printf("ВНИМАНИЕ: режим dry_run — изменяющие команды не выполняются")
 	}
-	log.Printf("GoServerPanel %s: https://%s", version, cfg.Listen)
+	log.Printf("GoServerPanel %s: https://%s", update.Current, cfg.Listen)
 	if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

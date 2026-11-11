@@ -146,7 +146,7 @@ function renderShell() {
   const logout = async () => { try { await api('POST', '/logout'); } catch (e) { /* */ } ME = null; renderLogin(); };
   $app.replaceChildren(h('div', { class: 'layout' },
     h('aside', { class: 'side' },
-      h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('server', 18)), h('div', { class: 'brand-name' }, 'Go', h('span', {}, 'ServerPanel'))),
+      h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('server', 18)), h('div', {}, h('div', { class: 'brand-name' }, 'Go', h('span', {}, 'ServerPanel')), ME.version ? h('div', { class: 'muted small' }, 'v' + ME.version) : null)),
       nav, h('div', { class: 'grow' }),
       h('div', { class: 'user' },
         h('div', { class: 'avatar' }, (ME.user.username[0] || '?').toUpperCase()),
@@ -189,11 +189,71 @@ async function boot() {
   renderShell();
 }
 
+
+// ---------- Обновления панели ----------
+// После перезапуска панель недоступна несколько секунд: ждём, пока /api/me снова ответит, и перезагружаем страницу.
+function waitRestart() {
+  const box = h('div', { class: 'overlay' }, h('div', { class: 'modal' }, h('h2', {}, 'Перезапуск панели…'), h('p', { class: 'muted' }, 'Страница обновится автоматически.')));
+  document.body.append(box);
+  let n = 0;
+  const tick = async () => {
+    n++;
+    try { const r = await fetch('/api/me', { credentials: 'same-origin' }); if (r.status < 500 && n > 2) return location.reload(); } catch (e) { /* ещё не поднялась */ }
+    if (n > 60) { box.remove(); toast('Панель не ответила за минуту — проверьте systemctl status goserverpanel', true); return; }
+    setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 2500);
+}
+
+function startUpdate(info) {
+  confirmBox('Обновить панель ' + info.current + ' → ' + info.latest + '? Панель перезапустится, текущая версия сохранится для отката.', async () => {
+    const r = await api('POST', '/update/apply');
+    jobModal(r.job, 'Обновление панели до ' + info.latest, async () => {
+      try { const j = await api('GET', '/jobs/' + r.job); if (j.status === 'done' && !ME.dry_run) waitRestart(); } catch (e) { /* */ }
+    });
+  }, 'Обновить');
+}
+
+function updateCard(main) {
+  const card = h('div', { class: 'card' });
+  const draw = i => {
+    const rows = [h('div', { class: 'row sp' }, h('h2', {}, 'Обновления'),
+      h('button', { class: 'sm', onclick: guard(async () => { draw(await api('POST', '/update/check')); }) }, 'Проверить сейчас'))];
+    rows.push(h('p', {}, 'Установлена версия: ', h('b', {}, i.current),
+      i.latest ? [' · последняя: ', h('b', {}, i.latest)] : null, ' ',
+      i.available ? h('span', { class: 'badge warn' }, 'доступно обновление') : (i.latest && !i.error ? h('span', { class: 'badge ok' }, 'актуальная') : null)));
+    if (i.error) rows.push(h('div', { class: 'err-box' }, i.error));
+    if (i.available && i.notes) rows.push(h('pre', { class: 'log', style: 'max-height:200px' }, i.notes));
+    if (i.available && !i.can_apply && i.reason) rows.push(h('p', { class: 'muted small' }, i.reason));
+    if (i.checked_at) rows.push(h('p', { class: 'muted small' }, 'Проверено: ' + fmtDate(i.checked_at)));
+    const btns = [];
+    if (i.available) btns.push(h('button', { class: 'primary', disabled: !i.can_apply, onclick: () => startUpdate(i) }, 'Обновить до ' + i.latest));
+    if (i.url) btns.push(h('a', { href: i.url, target: '_blank', rel: 'noopener noreferrer' }, h('button', {}, 'Страница релиза')));
+    if (i.has_backup) btns.push(h('button', { class: 'danger', onclick: () => confirmBox('Вернуться к предыдущей версии? Панель перезапустится.', async () => { await api('POST', '/update/rollback'); waitRestart(); }, 'Откатить') }, 'Откатить на предыдущую'));
+    if (btns.length) rows.push(h('div', { class: 'row' }, btns));
+    card.replaceChildren(...rows);
+  };
+  api('GET', '/update').then(draw).catch(e => card.replaceChildren(h('div', { class: 'err-box' }, e.message)));
+  main.append(card);
+}
+
+// Баннер на дашборде (только админ, из кэша, без обращения к GitHub, если проверка ещё не выполнялась)
+async function updateBanner(holder) {
+  if (ME.user.role !== 'admin') return;
+  try {
+    const i = await api('GET', '/update');
+    if (!i.available) return;
+    holder.replaceChildren(h('div', { class: 'banner' }, h('div', {}, h('b', {}, 'Доступна новая версия ' + i.latest), h('span', { class: 'muted' }, ' (у вас ' + i.current + ')')),
+      h('div', { class: 'row' }, h('button', { class: 'primary sm', disabled: !i.can_apply, onclick: () => startUpdate(i) }, 'Обновить'), h('a', { href: '#settings' }, h('button', { class: 'sm' }, 'Подробнее')))));
+  } catch (e) { /* не критично */ }
+}
+
 // ---------- Дашборд ----------
 async function pageDashboard(main) {
   const cpu = h('div'), mem = h('div'), disks = h('div'), info = h('div', { class: 'muted small' });
-  const svc = h('tbody');
-  main.append(h('h1', {}, 'Дашборд'),
+  const svc = h('tbody'), ubar = h('div');
+  updateBanner(ubar);
+  main.append(h('h1', {}, 'Дашборд'), ubar,
     h('div', { class: 'grid' },
       h('div', { class: 'card' }, h('h2', {}, 'Процессор'), cpu),
       h('div', { class: 'card' }, h('h2', {}, 'Память'), mem),
@@ -698,6 +758,7 @@ async function pageSettings(main) {
   };
   drawTF(); main.append(tf);
   if (u.role !== 'admin') return;
+  updateCard(main);
   const ub = h('div', { class: 'card' }), ab = h('div', { class: 'card' });
   main.append(ub, ab);
   const loadUsers = async () => {
