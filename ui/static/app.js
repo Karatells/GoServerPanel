@@ -225,7 +225,7 @@ function updateCard(main) {
     if (i.error) rows.push(h('div', { class: 'err-box' }, i.error));
     if (i.available && i.notes) rows.push(h('pre', { class: 'log', style: 'max-height:200px' }, i.notes));
     if (i.available && !i.can_apply && i.reason) rows.push(h('p', { class: 'muted small' }, i.reason));
-    if (i.checked_at) rows.push(h('p', { class: 'muted small' }, 'Проверено: ' + fmtDate(i.checked_at)));
+    if (i.checked_at && new Date(i.checked_at).getFullYear() > 2000) rows.push(h('p', { class: 'muted small' }, 'Проверено: ' + fmtDate(i.checked_at)));
     const btns = [];
     if (i.available) btns.push(h('button', { class: 'primary', disabled: !i.can_apply, onclick: () => startUpdate(i) }, 'Обновить до ' + i.latest));
     if (i.url) btns.push(h('a', { href: i.url, target: '_blank', rel: 'noopener noreferrer' }, h('button', {}, 'Страница релиза')));
@@ -298,7 +298,7 @@ async function pageSites(main) {
   const load = async () => {
     const sites = await api('GET', '/sites');
     tbody.replaceChildren(...sites.map(s => h('tr', {},
-      h('td', {}, h('b', {}, s.domain), s.aliases?.length ? h('div', { class: 'muted small' }, s.aliases.join(', ')) : null, s.cms ? h('span', { class: 'badge', style: 'margin-left:6px' }, s.cms) : null),
+      h('td', {}, h('b', {}, s.domain), s.aliases?.length ? h('div', { class: 'muted small' }, s.aliases.join(', ')) : null, s.cms ? h('span', { class: 'badge', style: 'margin-left:6px' }, s.cms) : null, s.protected ? h('span', { class: 'badge warn', style: 'margin-left:6px', title: 'Доступ только после входа' }, '🔒 вход') : null),
       h('td', {}, (s.proxies?.length ? 'proxy' : 'static') + (s.raw_config ? ' · raw' : '')),
       h('td', {}, s.php_version || '—'),
       h('td', {}, s.cert_id ? h('span', { class: 'badge ok' }, s.force_https ? 'HTTPS ⇒' : 'HTTPS') : '—'),
@@ -326,6 +326,9 @@ async function pageSites(main) {
     const certSel = h('select', {}, h('option', { value: '' }, 'без HTTPS'), certs.map(c => h('option', { value: c.serial, selected: c.serial === s.cert_id }, c.domain + ' (до ' + new Date(c.not_after).toLocaleDateString('ru-RU') + ')')));
     const force = check('Принудительно перенаправлять HTTP → HTTPS', s.force_https);
     const cache = check('Кэширование статики (expires 30d)', s.cache);
+    const prot = check('Защитить входом (общие аккаунты из Настроек)', s.protected);
+    const protNote = h('div', { class: 'muted small', style: 'margin:-4px 0 8px 24px' }, 'Посетитель увидит страницу входа. Аккаунты: Настройки → «Аккаунты для сайтов».');
+    api('GET', '/siteusers').then(l => { if (!l.length) protNote.textContent = '⚠ Пока нет ни одного аккаунта — после включения защиты на сайт никто не войдёт. Создайте их в Настройках → «Аккаунты для сайтов».'; }).catch(() => { });
     const maxBody = h('input', { value: s.max_body || '64m' });
     let proxies = JSON.parse(JSON.stringify(s.proxies || [])), redirects = JSON.parse(JSON.stringify(s.redirects || []));
     const pBox = h('div'), rBox = h('div');
@@ -345,13 +348,13 @@ async function pageSites(main) {
     modal(isNew ? 'Новый сайт' : 'Сайт ' + s.domain, h('div', {},
       field('Домен', domain), field('Алиасы', aliases), field('Корневая директория', root),
       h('div', { class: 'row' }, h('div', { style: 'flex:1' }, field('Версия PHP', phpSel)), h('div', { style: 'flex:1' }, field('Сертификат (SSL / PKI)', certSel))),
-      force.el, cache.el, field('client_max_body_size', maxBody),
+      force.el, cache.el, prot.el, protNote, field('client_max_body_size', maxBody),
       h('h2', {}, 'Reverse proxy'), pBox, h('button', { class: 'sm', onclick: () => { proxies.push({ path: '/', upstreams: [], websocket: false, balance: 'round_robin' }); drawP(); } }, '+ правило прокси'),
       h('h2', { style: 'margin-top:14px' }, 'Редиректы'), rBox, h('button', { class: 'sm', onclick: () => { redirects.push({ from: '', to: '', code: 301 }); drawR(); } }, '+ редирект')),
       [{ label: 'Отмена' }, {
         label: 'Сохранить', primary: true, onclick: async () => {
           wsChecks();
-          const body = { ...s, domain: domain.value, aliases: aliases.value.split(',').map(x => x.trim()).filter(Boolean), root: root.value.trim(), php_version: phpSel.value, cert_id: certSel.value, force_https: force.get(), cache: cache.get(), max_body: maxBody.value, proxies, redirects };
+          const body = { ...s, domain: domain.value, aliases: aliases.value.split(',').map(x => x.trim()).filter(Boolean), root: root.value.trim(), php_version: phpSel.value, cert_id: certSel.value, force_https: force.get(), cache: cache.get(), protected: prot.get(), max_body: maxBody.value, proxies, redirects };
           await (isNew ? api('POST', '/sites', body) : api('PUT', '/sites/' + s.id, body));
           load();
         }
@@ -734,6 +737,32 @@ async function pageFiles(main) {
   await load('');
 }
 
+
+// ---------- Аккаунты для входа на сайты ----------
+function siteUsersCard(main) {
+  const card = h('div', { class: 'card' });
+  const load = async () => {
+    const list = await api('GET', '/siteusers');
+    card.replaceChildren(
+      h('div', { class: 'row sp' }, h('h2', {}, 'Аккаунты для сайтов'), h('button', { class: 'primary sm', onclick: () => {
+        const n = h('input', { autocomplete: 'off' }), p = h('input', { type: 'password', autocomplete: 'new-password' });
+        modal('Новый аккаунт для сайтов', h('div', {}, field('Логин', n), field('Пароль (≥8 символов)', p)),
+          [{ label: 'Отмена' }, { label: 'Создать', primary: true, onclick: async () => { await api('POST', '/siteusers', { username: n.value, password: p.value }); load(); } }]);
+      } }, '+ Аккаунт')),
+      h('p', { class: 'muted small' }, 'Общий список: любой из этих аккаунтов может войти на любой сайт, у которого включена «Защита входом» (Веб-сайты → Изменить). К самой панели эти аккаунты доступа не дают.'),
+      list.length ? h('table', {}, h('tbody', {}, list.map(x => h('tr', {},
+        h('td', {}, x.username), h('td', { class: 'muted small' }, fmtDate(x.created)),
+        h('td', { class: 'row', style: 'justify-content:flex-end' },
+          h('button', { class: 'sm', onclick: () => {
+            const p = h('input', { type: 'password', autocomplete: 'new-password' });
+            modal('Новый пароль для ' + x.username, field('Пароль (≥8 символов)', p), [{ label: 'Отмена' }, { label: 'Сменить', primary: true, onclick: async () => { await api('POST', '/siteusers/' + x.id + '/password', { password: p.value }); toast('Пароль изменён, старые сессии завершены'); } }]);
+          } }, 'Пароль'),
+          h('button', { class: 'sm danger', onclick: () => confirmBox('Удалить аккаунт ' + x.username + '? Он сразу потеряет доступ ко всем сайтам.', async () => { await api('DELETE', '/siteusers/' + x.id); load(); }) }, 'Удалить')))))) : h('div', { class: 'muted' }, 'Аккаунтов пока нет'));
+  };
+  load().catch(e => card.replaceChildren(h('div', { class: 'err-box' }, e.message)));
+  main.append(card);
+}
+
 // ---------- Настройки ----------
 async function pageSettings(main) {
   const u = ME.user;
@@ -759,6 +788,7 @@ async function pageSettings(main) {
   drawTF(); main.append(tf);
   if (u.role !== 'admin') return;
   updateCard(main);
+  siteUsersCard(main);
   const ub = h('div', { class: 'card' }), ab = h('div', { class: 'card' });
   main.append(ub, ab);
   const loadUsers = async () => {

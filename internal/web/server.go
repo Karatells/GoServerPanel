@@ -154,6 +154,21 @@ func (a *App) secure(next http.Handler) http.Handler {
 				fail(w, 500, "внутренняя ошибка")
 			}
 		}()
+		if strings.HasPrefix(r.URL.Path, "/gate/") {
+			// только nginx с этого же сервера; ограничения IP панели к посетителям сайтов не относятся
+			if !isLocal(clientIP(r)) {
+				http.NotFound(w, r)
+				return
+			}
+			h := w.Header()
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set("Referrer-Policy", "same-origin")
+			h.Set("Cache-Control", "no-store")
+			h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+			next.ServeHTTP(w, r)
+			return
+		}
 		if len(a.cidrs) > 0 {
 			ip := net.ParseIP(clientIP(r))
 			ok := false
@@ -297,6 +312,15 @@ func (a *App) Handler() http.Handler {
 	r("POST /api/update/check", lvlAdmin, a.handleUpdateCheck)
 	r("POST /api/update/apply", lvlAdmin, a.handleUpdateApply)
 	r("POST /api/update/rollback", lvlAdmin, a.handleUpdateRollback)
+
+	r("GET /api/siteusers", lvlAdmin, a.handleSiteUsers)
+	r("POST /api/siteusers", lvlAdmin, a.handleSiteUserCreate)
+	r("POST /api/siteusers/{id}/password", lvlAdmin, a.handleSiteUserPassword)
+	r("DELETE /api/siteusers/{id}", lvlAdmin, a.handleSiteUserDelete)
+	mux.HandleFunc("GET /gate/verify", a.gateOnly(a.handleGateVerify))
+	mux.HandleFunc("GET /gate/login", a.gateOnly(a.handleGateLoginPage))
+	mux.HandleFunc("POST /gate/login", a.gateOnly(a.handleGateLogin))
+	mux.HandleFunc("GET /gate/logout", a.gateOnly(a.handleGateLogout))
 	r("GET /api/stats", lvlAny, a.handleStats)
 	r("GET /api/ws/stats", lvlAny, a.handleStatsWS)
 	r("GET /api/services", lvlAny, a.handleServices)

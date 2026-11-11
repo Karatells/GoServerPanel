@@ -39,7 +39,7 @@ func TestRender(t *testing.T) {
 			{Path: "/api", Upstreams: []string{"http://127.0.0.1:3000"}, WebSocket: true},
 			{Path: "/lb", Upstreams: []string{"http://10.0.0.1:80", "http://10.0.0.2:80"}, Balance: "least_conn"},
 		}}
-	out := Render(s, &TLS{Cert: "/c.pem", Key: "/k.pem"}, "/run/php/php8.3-fpm.sock", "/var/log/nginx")
+	out := Render(s, &TLS{Cert: "/c.pem", Key: "/k.pem"}, "/run/php/php8.3-fpm.sock", "/var/log/nginx", "")
 	for _, want := range []string{
 		"server_name example.com www.example.com;",
 		"return 301 https://$host$request_uri;",
@@ -55,5 +55,39 @@ func TestRender(t *testing.T) {
 	}
 	if strings.Count(out, "listen 80;") != 1 {
 		t.Errorf("expected exactly one http server")
+	}
+}
+
+func TestRenderProtected(t *testing.T) {
+	s := store.Site{ID: "1", Domain: "p.example.com", Root: "/var/www/p/public_html", MaxBody: "1m", Protected: true}
+	out := Render(s, nil, "", "/var/log/nginx", "127.0.0.1:8443")
+	for _, want := range []string{
+		"auth_request /_gsp/verify;", "error_page 401 = @gsp_login;",
+		"location = /_gsp/verify {", "internal;", "proxy_pass https://127.0.0.1:8443/gate/verify;",
+		"location ^~ /_gsp/ {", "proxy_pass https://127.0.0.1:8443/gate/;", "proxy_set_header X-Gate-Host $host;",
+		"return 302 /_gsp/login?next=$request_uri;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("protected config lacks %q\n%s", want, out)
+		}
+	}
+	// без адреса панели защита не должна молча пропадать — сайт закрывается
+	if out := Render(s, nil, "", "/var/log/nginx", ""); !strings.Contains(out, "return 503;") || strings.Contains(out, "auth_request") {
+		t.Errorf("must fail closed without gate address:\n%s", out)
+	}
+	// незащищённый сайт не получает лишних директив
+	s.Protected = false
+	if out := Render(s, nil, "", "/var/log/nginx", "127.0.0.1:8443"); strings.Contains(out, "auth_request") || strings.Contains(out, "_gsp") {
+		t.Error("unprotected site must not contain gate directives")
+	}
+	// ручной конфиг несовместим с защитой
+	s.Protected, s.RawConfig = true, "server {}"
+	if err := Validate(&s, "/var/www"); err == nil {
+		t.Error("raw config + protected must be rejected")
+	}
+	for in, want := range map[string]string{"0.0.0.0:8443": "127.0.0.1:8443", ":9000": "127.0.0.1:9000", "[::]:8443": "127.0.0.1:8443", "10.1.2.3:8443": "10.1.2.3:8443", "bad": ""} {
+		if got := GateAddr(in); got != want {
+			t.Errorf("GateAddr(%q)=%q want %q", in, got, want)
+		}
 	}
 }

@@ -274,7 +274,7 @@ func (a *App) handleSiteConfigGet(w http.ResponseWriter, r *http.Request) {
 	if s.PHPVersion != "" {
 		sock = a.PHP.Socket(s.PHPVersion)
 	}
-	gen := nginx.Render(s, a.siteTLS(s), sock, a.Cfg.NginxLogDir)
+	gen := nginx.Render(s, a.siteTLS(s), sock, a.Cfg.NginxLogDir, nginx.GateAddr(a.Cfg.Listen))
 	cfg := gen
 	if s.RawConfig != "" {
 		cfg = s.RawConfig
@@ -294,6 +294,10 @@ func (a *App) handleSiteConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.RawConfig = strings.ReplaceAll(in.Config, "\r\n", "\n")
+	if s.RawConfig != "" && s.Protected {
+		fail(w, 400, "сайт защищён входом: ручной конфиг не поддерживает защиту — сначала отключите её")
+		return
+	}
 	if s.RawConfig == "" && s.Root == "" && len(s.Proxies) == 0 {
 		fail(w, 400, "у сайта нет ни корня, ни прокси — генерируемый конфиг был бы пустым")
 		return

@@ -49,6 +49,7 @@ type Site struct {
 	MaxBody    string      `json:"max_body"`
 	RawConfig  string      `json:"raw_config"` // если не пусто — используется вместо сгенерированного
 	CMS        string      `json:"cms,omitempty"`
+	Protected  bool        `json:"protected"` // доступ только после входа (общие аккаунты SiteUsers)
 	Created    time.Time   `json:"created"`
 }
 
@@ -71,9 +72,18 @@ type Audit struct {
 	Detail string    `json:"detail"`
 }
 
+// SiteUser — общий аккаунт для входа на защищённые сайты (не имеет доступа к панели).
+type SiteUser struct {
+	ID       string    `json:"id"`
+	Username string    `json:"username"`
+	PassHash string    `json:"pass_hash"`
+	Created  time.Time `json:"created"`
+}
+
 type Data struct {
 	JWTSecret string     `json:"jwt_secret"`
 	Users     []User     `json:"users"`
+	SiteUsers []SiteUser `json:"site_users"`
 	Sites     []Site     `json:"sites"`
 	Certs     []CertMeta `json:"certs"`
 	Audit     []Audit    `json:"audit"`
@@ -89,6 +99,7 @@ type userDisk struct {
 type diskData struct {
 	JWTSecret string     `json:"jwt_secret"`
 	Users     []userDisk `json:"users"`
+	SiteUsers []SiteUser `json:"site_users"`
 	Sites     []Site     `json:"sites"`
 	Certs     []CertMeta `json:"certs"`
 	Audit     []Audit    `json:"audit"`
@@ -118,7 +129,7 @@ func Open(path string) (*Store, error) {
 		if err := json.Unmarshal(raw, &dd); err != nil {
 			return nil, err
 		}
-		s.d = Data{JWTSecret: dd.JWTSecret, Sites: dd.Sites, Certs: dd.Certs, Audit: dd.Audit}
+		s.d = Data{JWTSecret: dd.JWTSecret, SiteUsers: dd.SiteUsers, Sites: dd.Sites, Certs: dd.Certs, Audit: dd.Audit}
 		for _, u := range dd.Users {
 			u.User.PassHash, u.User.TOTPSecret = u.PassHash, u.TOTPSecret
 			s.d.Users = append(s.d.Users, u.User)
@@ -163,7 +174,7 @@ func (s *Store) Update(fn func(d *Data) error) error {
 }
 
 func toDisk(d Data) diskData {
-	dd := diskData{JWTSecret: d.JWTSecret, Sites: d.Sites, Certs: d.Certs, Audit: d.Audit}
+	dd := diskData{JWTSecret: d.JWTSecret, SiteUsers: d.SiteUsers, Sites: d.Sites, Certs: d.Certs, Audit: d.Audit}
 	for _, u := range d.Users {
 		dd.Users = append(dd.Users, userDisk{User: u, PassHash: u.PassHash, TOTPSecret: u.TOTPSecret})
 	}
@@ -171,7 +182,7 @@ func toDisk(d Data) diskData {
 }
 
 func fromDisk(dd diskData) Data {
-	d := Data{JWTSecret: dd.JWTSecret, Sites: dd.Sites, Certs: dd.Certs, Audit: dd.Audit}
+	d := Data{JWTSecret: dd.JWTSecret, SiteUsers: dd.SiteUsers, Sites: dd.Sites, Certs: dd.Certs, Audit: dd.Audit}
 	for _, u := range dd.Users {
 		u.User.PassHash, u.User.TOTPSecret = u.PassHash, u.TOTPSecret
 		d.Users = append(d.Users, u.User)

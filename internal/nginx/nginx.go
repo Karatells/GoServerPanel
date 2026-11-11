@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -122,7 +123,35 @@ func Validate(s *store.Site, wwwRoot string) error {
 	if s.Root == "" && len(s.Proxies) == 0 && s.RawConfig == "" {
 		return fmt.Errorf("укажите корневую директорию или правило прокси")
 	}
+	if s.Protected && s.RawConfig != "" {
+		return fmt.Errorf("защита входом не работает с ручным конфигом: верните генерируемый конфиг или отключите защиту")
+	}
 	return nil
+}
+
+// GateAddr возвращает host:port, по которому nginx обращается к панели (из listen).
+func GateAddr(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return ""
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// gateBlock — директивы общей авторизации: каждый запрос проверяется панелью (auth_request),
+// без входа посетитель попадает на страницу /_gsp/login. Если панель недоступна, доступ закрыт.
+func gateBlock(gate string) string {
+	hdr := "        proxy_set_header X-Gate-Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-Proto $scheme;\n"
+	return "\n    # --- GoServerPanel: защита входом ---\n" +
+		"    auth_request /_gsp/verify;\n    error_page 401 = @gsp_login;\n" +
+		"\n    location = /_gsp/verify {\n        internal;\n        auth_request off;\n        proxy_pass https://" + gate + "/gate/verify;\n" +
+		"        proxy_pass_request_body off;\n        proxy_set_header Content-Length \"\";\n" + hdr + "    }\n" +
+		"\n    location ^~ /_gsp/ {\n        auth_request off;\n        proxy_pass https://" + gate + "/gate/;\n" + hdr + "    }\n" +
+		"\n    location @gsp_login {\n        return 302 /_gsp/login?next=$request_uri;\n    }\n"
 }
 
 func upstreamName(domain string, i int) string {
@@ -130,7 +159,7 @@ func upstreamName(domain string, i int) string {
 }
 
 // Render генерирует конфигурацию сайта.
-func Render(s store.Site, tls *TLS, phpSock, logDir string) string {
+func Render(s store.Site, tls *TLS, phpSock, logDir, gate string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Managed by GoServerPanel (site %s). Ручные правки будут перезаписаны.\n", s.ID)
 
@@ -158,6 +187,13 @@ func Render(s store.Site, tls *TLS, phpSock, logDir string) string {
 		fmt.Fprintf(&l, "    error_log %s/%s.error.log;\n", logDir, s.Domain)
 		if s.Root != "" {
 			fmt.Fprintf(&l, "    root %s;\n    index index.php index.html index.htm;\n", s.Root)
+		}
+		if s.Protected {
+			if gate == "" {
+				l.WriteString("    return 503; # защита включена, но адрес панели неизвестен\n")
+			} else {
+				l.WriteString(gateBlock(gate))
+			}
 		}
 		for _, r := range s.Redirects {
 			fmt.Fprintf(&l, "\n    location %s {\n        return %d %s;\n    }\n", r.From, r.Code, r.To)
@@ -254,7 +290,7 @@ func (m *Manager) setLink(domain string, enabled bool) error {
 func (m *Manager) Apply(ctx context.Context, s store.Site, tls *TLS, phpSock string) (rendered string, err error) {
 	rendered = s.RawConfig
 	if rendered == "" {
-		rendered = Render(s, tls, phpSock, m.Cfg.NginxLogDir)
+		rendered = Render(s, tls, phpSock, m.Cfg.NginxLogDir, GateAddr(m.Cfg.Listen))
 	}
 	cp := m.confPath(s.Domain)
 	old, oldErr := os.ReadFile(cp)

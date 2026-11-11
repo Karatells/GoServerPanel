@@ -9,9 +9,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -364,5 +366,151 @@ func TestUpdateAPI(t *testing.T) {
 	}
 	if code, _, _ := e.call("POST", "/api/update/rollback", nil, admin, nil); code != 400 {
 		t.Errorf("rollback without backup must be 400, got %d", code)
+	}
+}
+
+func TestSiteGate(t *testing.T) {
+	e := newEnv(t)
+	admin, viewer := e.login("admin"), e.login("viewer")
+
+	// управление аккаунтами — только admin
+	if code, _, _ := e.call("GET", "/api/siteusers", nil, viewer, nil); code != 403 {
+		t.Errorf("viewer must not list site users: %d", code)
+	}
+	if code, _, _ := e.call("POST", "/api/siteusers", map[string]string{"username": "bob", "password": "short"}, admin, nil); code != 400 {
+		t.Errorf("weak password must be rejected: %d", code)
+	}
+	code, body, _ := e.call("POST", "/api/siteusers", map[string]string{"username": "bob", "password": "bobs-password-1"}, admin, nil)
+	if code != 201 || body["pass_hash"] != nil {
+		t.Fatalf("create site user: %d %v", code, body)
+	}
+	bobID := body["id"].(string)
+	if code, _, _ := e.call("POST", "/api/siteusers", map[string]string{"username": "BOB", "password": "another-pass-1"}, admin, nil); code != 409 {
+		t.Errorf("duplicate (case-insensitive) must be 409, got %d", code)
+	}
+
+	// защищённый и обычный сайт
+	code, site, _ := e.call("POST", "/api/sites", map[string]any{"domain": "closed.example.com", "protected": true}, admin, nil)
+	if code != 201 {
+		t.Fatalf("create protected site: %d %v", code, site)
+	}
+	if code, _, _ := e.call("POST", "/api/sites", map[string]any{"domain": "open.example.com"}, admin, nil); code != 201 {
+		t.Fatal("create open site")
+	}
+	conf, _ := os.ReadFile(filepath.Join(e.cfg.NginxAvailable, "gsp-closed.example.com.conf"))
+	if !strings.Contains(string(conf), "auth_request /_gsp/verify;") {
+		t.Errorf("protected site config lacks auth_request:\n%s", conf)
+	}
+	if c, _ := os.ReadFile(filepath.Join(e.cfg.NginxAvailable, "gsp-open.example.com.conf")); strings.Contains(string(c), "auth_request") {
+		t.Error("open site must not be protected")
+	}
+
+	gate := func(method, path, host string, form url.Values, cookie *http.Cookie) *http.Response {
+		var rd io.Reader
+		if form != nil {
+			rd = strings.NewReader(form.Encode())
+		}
+		req, _ := http.NewRequest(method, e.srv.URL+path, rd)
+		req.Header.Set("X-Gate-Host", host)
+		req.Header.Set("X-Real-IP", "203.0.113.7")
+		if form != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		cl := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	login := func(user, pass, next string) *http.Response {
+		return gate("POST", "/gate/login", "closed.example.com", url.Values{"username": {user}, "password": {pass}, "next": {next}}, nil)
+	}
+
+	if r := gate("GET", "/gate/verify", "closed.example.com", nil, nil); r.StatusCode != 401 {
+		t.Errorf("verify without cookie: %d", r.StatusCode)
+	}
+	if r := gate("GET", "/gate/login", "closed.example.com", nil, nil); r.StatusCode != 200 {
+		t.Errorf("login page: %d", r.StatusCode)
+	}
+	if r := gate("GET", "/gate/login", "open.example.com", nil, nil); r.StatusCode != 404 {
+		t.Errorf("gate for unprotected site must be 404, got %d", r.StatusCode)
+	}
+	if r := login("bob", "wrong-password", "/"); r.StatusCode != 401 {
+		t.Errorf("bad password: %d", r.StatusCode)
+	}
+	// open redirect исключён
+	r := login("bob", "bobs-password-1", "//evil.example/x")
+	if r.StatusCode != 303 || r.Header.Get("Location") != "/" {
+		t.Fatalf("login: %d loc=%q", r.StatusCode, r.Header.Get("Location"))
+	}
+	var ck *http.Cookie
+	for _, c := range r.Cookies() {
+		if c.Name == "gsp_gate" {
+			ck = c
+		}
+	}
+	if ck == nil || !ck.HttpOnly {
+		t.Fatalf("gate cookie missing or not HttpOnly: %v", ck)
+	}
+	if r := login("BOB", "bobs-password-1", "/page?a=1&b=2"); r.Header.Get("Location") != "/page?a=1&b=2" {
+		t.Errorf("next must be preserved, got %q", r.Header.Get("Location"))
+	}
+	if r := gate("GET", "/gate/verify", "closed.example.com", nil, ck); r.StatusCode != 200 {
+		t.Errorf("verify with cookie: %d", r.StatusCode)
+	}
+	// токен привязан к сайту
+	if r := gate("GET", "/gate/verify", "open.example.com", nil, ck); r.StatusCode != 401 {
+		t.Errorf("cookie must not be valid for another site: %d", r.StatusCode)
+	}
+	// токен сайта не даёт доступа в панель
+	if code, _, _ := e.call("GET", "/api/me", nil, &http.Cookie{Name: "gsp_session", Value: ck.Value}, nil); code != 401 {
+		t.Errorf("gate token must not work as panel session: %d", code)
+	}
+	// смена пароля завершает сессии
+	if code, _, _ := e.call("POST", "/api/siteusers/"+bobID+"/password", map[string]string{"password": "new-password-22"}, admin, nil); code != 200 {
+		t.Fatal("change password")
+	}
+	if r := gate("GET", "/gate/verify", "closed.example.com", nil, ck); r.StatusCode != 401 {
+		t.Errorf("session must end after password change: %d", r.StatusCode)
+	}
+	r = login("bob", "new-password-22", "/")
+	for _, c := range r.Cookies() {
+		if c.Name == "gsp_gate" {
+			ck = c
+		}
+	}
+	if r := gate("GET", "/gate/verify", "closed.example.com", nil, ck); r.StatusCode != 200 {
+		t.Fatalf("verify after re-login: %d", r.StatusCode)
+	}
+	// удаление аккаунта закрывает доступ
+	e.call("DELETE", "/api/siteusers/"+bobID, nil, admin, nil)
+	if r := gate("GET", "/gate/verify", "closed.example.com", nil, ck); r.StatusCode != 401 {
+		t.Errorf("deleted account must lose access: %d", r.StatusCode)
+	}
+	// перебор: после 5 неудач блокировка
+	for i := 0; i < 5; i++ {
+		login("nobody", "x", "/")
+	}
+	if r := login("nobody", "x", "/"); r.StatusCode != 429 {
+		t.Errorf("gate login must be throttled, got %d", r.StatusCode)
+	}
+	// ручной конфиг и защита несовместимы
+	id := site["id"].(string)
+	if code, _, _ := e.call("PUT", "/api/sites/"+id+"/config", map[string]string{"config": "server {}"}, admin, nil); code != 400 {
+		t.Errorf("raw config on protected site must be 400, got %d", code)
+	}
+	// маршруты /gate/ недоступны не с сервера
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/gate/login", nil)
+	req.RemoteAddr = "198.51.100.9:5555"
+	req.Header.Set("X-Gate-Host", "closed.example.com")
+	e.app.Handler().ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Errorf("remote access to gate must be 404, got %d", rec.Code)
 	}
 }
